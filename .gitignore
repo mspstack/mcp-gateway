@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.serena/
+*.log
+.env
+.env.*
+mspstack.config.local.json
+data/

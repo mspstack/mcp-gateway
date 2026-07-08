@@ -1,0 +1,44 @@
+{
+  "upstreams": [
+    {
+      "id": "itglue",
+      "namespace": "itglue",
+      "transport": "http",
+      "url": "http://localhost:3000/mcp",
+      "headers": {
+        "Authorization": "Bearer ${ITGLUE_GATEWAY_TOKEN}"
+      }
+    },
+    {
+      "id": "connectwise",
+      "namespace": "cw",
+      "transport": "http",
+      "url": "http://localhost:3001/mcp",
+      "headers": {
+        "x-cw-public-key": "${CW_PUBLIC_KEY}",
+        "x-cw-private-key": "${CW_PRIVATE_KEY}",
+        "x-cw-member-id": "${CW_MEMBER_ID}",
+        "x-cw-toolsets": "all"
+      }
+    },
+    {
+      "id": "planner",
+      "namespace": "planner",
+      "transport": "http",
+      "url": "http://localhost:3002/mcp",
+      "headers": {
+        "x-ms-tenant-id": "${MS_TENANT_ID}",
+        "x-ms-client-id": "${MS_CLIENT_ID}",
+        "x-ms-client-secret": "${MS_CLIENT_SECRET}"
+      }
+    },
+    {
+      "id": "everything",
+      "namespace": "demo",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-everything"],
+      "enabled": false
+    }
+  ]
+}

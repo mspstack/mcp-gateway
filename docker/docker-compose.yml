@@ -1,0 +1,60 @@
+# MSPStack Gateway + OpenBao (+ optionally your MCP servers on the internal network).
+#
+#   cp ../.env.example .env   # fill in tokens
+#   docker compose up -d
+#
+# Only the gateway is exposed; upstream MCP servers stay on the internal network.
+
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "3100:3100"
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:3100}
+      MCP_TOKENS_ADMIN: ${MCP_TOKENS_ADMIN:?set in .env}
+      MCP_TOKENS_EDITOR: ${MCP_TOKENS_EDITOR:-}
+      MCP_TOKENS_VIEWER: ${MCP_TOKENS_VIEWER:-}
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_AUDIENCE: ${OIDC_AUDIENCE:-}
+      ENTRA_TENANT_ID: ${ENTRA_TENANT_ID:-}
+      ADMIN_BOOTSTRAP_SUBJECTS: ${ADMIN_BOOTSTRAP_SUBJECTS:-}
+      BAO_ADDR: http://openbao:8200
+      BAO_TOKEN: ${BAO_DEV_ROOT_TOKEN:-mspstack-dev}
+    volumes:
+      - gateway-data:/data
+    depends_on:
+      - openbao
+    networks: [internal]
+
+  openbao:
+    image: quay.io/openbao/openbao:latest
+    command: server -dev -dev-root-token-id=${BAO_DEV_ROOT_TOKEN:-mspstack-dev} -dev-listen-address=0.0.0.0:8200
+    # Dev mode is in-memory and for evaluation only. For production run a
+    # sealed/unsealed OpenBao with persistent storage and AppRole auth
+    # (BAO_ROLE_ID/BAO_SECRET_ID on the gateway) instead of a root token.
+    environment:
+      BAO_DEV_ROOT_TOKEN_ID: ${BAO_DEV_ROOT_TOKEN:-mspstack-dev}
+    cap_add: [IPC_LOCK]
+    networks: [internal]
+
+  # Example upstreams — uncomment and configure, then register them in the
+  # gateway (admin UI → MCP servers) with e.g. url http://mcp-itglue:3000/mcp
+  #
+  # mcp-itglue:
+  #   image: ghcr.io/selic/mcp-itglue:latest
+  #   environment:
+  #     TRANSPORT: http
+  #     ITGLUE_API_KEY: ${ITGLUE_API_KEY}
+  #     # Always set role tokens so dev-unauthenticated admin mode is OFF:
+  #     MCP_TOKENS_EDITOR: gateway:${ITGLUE_GATEWAY_TOKEN}
+  #     CLIENT_ITGLUE_KEYS: disabled
+  #   networks: [internal]
+
+volumes:
+  gateway-data:
+
+networks:
+  internal:

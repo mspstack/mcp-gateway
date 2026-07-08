@@ -1,0 +1,28 @@
+{
+  "name": "mspstack-gateway-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "MSPStack Gateway — self-hosted MCP manager: one endpoint federating many MCP servers with OAuth, roles, secret storage, and tool toggles",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "dev": "npm run dev --workspace packages/gateway"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "author": "Eugene Samotija (selic) <es@defency.net> (https://defency.net)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/selic/mspstack-gateway.git"
+  },
+  "homepage": "https://github.com/selic/mspstack-gateway#readme",
+  "bugs": {
+    "url": "https://github.com/selic/mspstack-gateway/issues"
+  }
+}

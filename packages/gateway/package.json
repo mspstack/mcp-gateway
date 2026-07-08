@@ -1,0 +1,62 @@
+{
+  "name": "mspstack-gateway",
+  "version": "0.1.0",
+  "description": "Self-hosted MCP gateway: one streamable-HTTP endpoint federating many MCP servers with namespaced tools, per-tool toggles, roles, and secure upstream credential injection",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "mspstack-gateway": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "public",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-gateway",
+    "model-context-protocol",
+    "gateway",
+    "aggregator",
+    "rbac",
+    "oauth",
+    "msp",
+    "mspstack"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "license": "MIT",
+  "author": "Eugene Samotija (selic) <es@defency.net> (https://defency.net)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/selic/mspstack-gateway.git",
+    "directory": "packages/gateway"
+  },
+  "homepage": "https://github.com/selic/mspstack-gateway#readme",
+  "bugs": {
+    "url": "https://github.com/selic/mspstack-gateway/issues"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "express": "^5.2.1",
+    "jose": "^6.0.11",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.1.0",
+    "tsx": "^4.22.5",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  }
+}

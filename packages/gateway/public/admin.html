@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MSPStack Gateway</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #171d24; --panel2: #1e2630; --border: #2a3441;
+    --text: #d8dee6; --muted: #8a97a5; --accent: #4da3ff; --ok: #3fb96a;
+    --warn: #e0a23c; --err: #e05c5c; --radius: 8px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 22px;
+    background: var(--panel); border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .spacer { flex: 1; }
+  nav { display: flex; gap: 4px; padding: 10px 22px 0; }
+  nav button { background: none; border: none; color: var(--muted); padding: 8px 14px;
+    cursor: pointer; border-radius: var(--radius) var(--radius) 0 0; font-size: 14px; }
+  nav button.active { background: var(--panel); color: var(--text); }
+  main { padding: 18px 22px; max-width: 1200px; }
+  section.panel { background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 16px; margin-bottom: 16px; }
+  h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); text-transform: uppercase;
+    letter-spacing: .06em; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  tr:last-child td { border-bottom: none; }
+  input, select, textarea { background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; font-size: 13px; }
+  input:focus, select:focus { outline: 1px solid var(--accent); }
+  button.btn { background: var(--accent); color: #06121f; border: none; border-radius: 6px;
+    padding: 7px 14px; font-weight: 600; cursor: pointer; font-size: 13px; }
+  button.btn.secondary { background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); }
+  button.btn.danger { background: var(--err); color: #fff; }
+  button.btn:disabled { opacity: .5; cursor: default; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+  .dot.ok { background: var(--ok); } .dot.err { background: var(--err); }
+  .dot.off { background: var(--muted); }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px;
+    background: var(--panel2); border: 1px solid var(--border); color: var(--muted); }
+  .pill.read { color: var(--ok); } .pill.write { color: var(--warn); }
+  .pill.destructive { color: var(--err); }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; margin-bottom: 10px; }
+  .row label { display: flex; flex-direction: column; gap: 4px; font-size: 12px;
+    color: var(--muted); }
+  .muted { color: var(--muted); } .mono { font-family: ui-monospace, monospace; font-size: 12px; }
+  #toast { position: fixed; bottom: 20px; right: 20px; background: var(--panel2);
+    border: 1px solid var(--border); border-left: 3px solid var(--accent); padding: 10px 16px;
+    border-radius: 6px; display: none; max-width: 420px; }
+  #toast.err { border-left-color: var(--err); }
+  #login { max-width: 420px; margin: 80px auto; }
+  .hidden { display: none !important; }
+  code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>MSPStack Gateway</h1>
+  <span id="version" class="muted"></span>
+  <div class="spacer"></div>
+  <button class="btn secondary hidden" id="logout">Log out</button>
+</header>
+
+<div id="login" class="panel section">
+  <section class="panel">
+    <h2>Admin sign in</h2>
+    <p class="muted">Paste an <b>admin bearer token</b> (a static <code>MCP_TOKENS_ADMIN</code> token or an OIDC access token for this gateway).</p>
+    <div class="row">
+      <input id="token-input" type="password" placeholder="admin token" style="flex:1">
+      <button class="btn" id="login-btn">Sign in</button>
+    </div>
+    <p class="muted" id="login-error"></p>
+  </section>
+</div>
+
+<div id="app" class="hidden">
+  <nav>
+    <button data-tab="status" class="active">Status</button>
+    <button data-tab="upstreams">MCP servers</button>
+    <button data-tab="tools">Tools</button>
+    <button data-tab="roles">Roles</button>
+    <button data-tab="users">Users</button>
+    <button data-tab="secrets">Secrets</button>
+  </nav>
+  <main>
+    <div id="tab-status"></div>
+    <div id="tab-upstreams" class="hidden"></div>
+    <div id="tab-tools" class="hidden"></div>
+    <div id="tab-roles" class="hidden"></div>
+    <div id="tab-users" class="hidden"></div>
+    <div id="tab-secrets" class="hidden"></div>
+  </main>
+</div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $ = (sel, el=document) => el.querySelector(sel);
+const $$ = (sel, el=document) => [...el.querySelectorAll(sel)];
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+let TOKEN = sessionStorage.getItem("mspstack-admin-token") || "";
+
+function toast(msg, isError=false) {
+  const el = $("#toast");
+  el.textContent = msg; el.className = isError ? "err" : "";
+  el.style.display = "block";
+  clearTimeout(el._t); el._t = setTimeout(() => el.style.display = "none", 4000);
+}
+
+async function api(path, opts={}) {
+  const res = await fetch("/api" + path, {
+    ...opts,
+    headers: { "Authorization": "Bearer " + TOKEN,
+      ...(opts.body ? {"Content-Type": "application/json"} : {}), ...(opts.headers||{}) },
+  });
+  if (res.status === 401 || res.status === 403) { logout(); throw new Error("Unauthorized"); }
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+  return body;
+}
+
+function logout() {
+  TOKEN = ""; sessionStorage.removeItem("mspstack-admin-token");
+  $("#app").classList.add("hidden"); $("#login").classList.remove("hidden");
+  $("#logout").classList.add("hidden");
+}
+
+async function login(token) {
+  TOKEN = token;
+  try {
+    await api("/status");
+    sessionStorage.setItem("mspstack-admin-token", token);
+    $("#login").classList.add("hidden"); $("#app").classList.remove("hidden");
+    $("#logout").classList.remove("hidden");
+    showTab("status");
+  } catch (e) {
+    TOKEN = "";
+    $("#login-error").textContent = "Sign-in failed: " + e.message;
+  }
+}
+
+$("#login-btn").onclick = () => login($("#token-input").value.trim());
+$("#token-input").addEventListener("keydown", e => { if (e.key === "Enter") $("#login-btn").click(); });
+$("#logout").onclick = logout;
+
+$$("nav button").forEach(b => b.onclick = () => showTab(b.dataset.tab));
+function showTab(name) {
+  $$("nav button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
+  $$("main > div").forEach(d => d.classList.toggle("hidden", d.id !== "tab-" + name));
+  RENDER[name]();
+}
+
+const tierPill = t => `<span class="pill ${esc(t)}">${esc(t)}</span>`;
+const dot = ok => `<span class="dot ${ok === null ? "off" : ok ? "ok" : "err"}"></span>`;
+
+// ── Status ──
+async function renderStatus() {
+  const el = $("#tab-status");
+  el.innerHTML = `<section class="panel"><h2>Loading…</h2></section>`;
+  const s = await api("/status");
+  $("#version").textContent = "v" + s.version;
+  el.innerHTML = `
+    <section class="panel"><h2>Gateway</h2>
+      <table>
+        <tr><td>Tools served</td><td>${s.toolCount}</td></tr>
+        <tr><td>OIDC</td><td>${s.oidc ? esc(s.oidc.issuer) : '<span class="muted">not configured</span>'}</td></tr>
+        <tr><td>Static tokens</td><td>${s.staticTokens.length ? s.staticTokens.map(t => `<span class="pill">${esc(t.label)} → ${esc(t.role)}</span>`).join(" ") : '<span class="muted">none</span>'}</td></tr>
+        <tr><td>Secret store</td><td>${s.secretStore ? dot(s.secretStore.ok) + esc(s.secretStore.detail) : '<span class="muted">not configured</span>'}</td></tr>
+      </table>
+    </section>
+    <section class="panel"><h2>Upstreams</h2>
+      <table>
+        <tr><th></th><th>ID</th><th>Namespace</th><th>Transport</th><th>Tools</th><th>Last error</th></tr>
+        ${s.upstreams.map(u => `<tr>
+          <td>${dot(u.enabled ? u.connected : null)}</td>
+          <td>${esc(u.id)}</td><td class="mono">${esc(u.namespace)}_*</td>
+          <td>${esc(u.transport)}</td><td>${u.toolCount}</td>
+          <td class="muted">${esc(u.lastError || "")}</td></tr>`).join("")}
+      </table>
+    </section>`;
+}
+
+// ── Upstreams ──
+async function renderUpstreams() {
+  const el = $("#tab-upstreams");
+  const list = await api("/upstreams");
+  el.innerHTML = `
+    <section class="panel"><h2>Configured MCP servers</h2>
+      <table>
+        <tr><th>ID</th><th>Namespace</th><th>Transport</th><th>Target</th><th>Source</th><th></th></tr>
+        ${list.map(u => `<tr>
+          <td>${esc(u.id)}</td><td class="mono">${esc(u.namespace)}</td><td>${esc(u.transport)}</td>
+          <td class="mono">${esc(u.transport === "http" ? u.url : u.command + " " + (u.args||[]).join(" "))}</td>
+          <td class="muted">${esc(u.source)}</td>
+          <td style="white-space:nowrap">
+            <button class="btn secondary" data-act="toggle" data-id="${esc(u.id)}" data-en="${!u.enabled}">${u.enabled ? "Disable" : "Enable"}</button>
+            <button class="btn danger" data-act="delete" data-id="${esc(u.id)}">Delete</button>
+          </td></tr>`).join("")}
+      </table>
+    </section>
+    <section class="panel"><h2>Add MCP server</h2>
+      <div class="row">
+        <label>Type <select id="add-type">
+          <option value="http">Remote URL (streamable HTTP)</option>
+          <option value="npm">npm package (npx, stdio)</option>
+          <option value="docker">Docker image (stdio)</option>
+        </select></label>
+        <label>ID <input id="add-id" placeholder="itglue"></label>
+        <label>Namespace <input id="add-ns" placeholder="itglue" pattern="[a-z0-9]+"></label>
+      </div>
+      <div class="row" id="add-http">
+        <label style="flex:1">URL <input id="add-url" placeholder="http://mcp-itglue:3000/mcp" style="width:100%"></label>
+      </div>
+      <div class="row hidden" id="add-npm">
+        <label style="flex:1">Package <input id="add-pkg" placeholder="@modelcontextprotocol/server-everything" style="width:100%"></label>
+        <label>Version <input id="add-ver" placeholder="latest" size="8"></label>
+      </div>
+      <div class="row hidden" id="add-docker">
+        <label style="flex:1">Image <input id="add-img" placeholder="ghcr.io/selic/mcp-itglue:latest" style="width:100%"></label>
+      </div>
+      <div class="row">
+        <label style="flex:1">Headers / env — one per line, <code>Name: value</code>; values may use <code>bao:path#field</code> or <code>\${ENV_VAR}</code>
+          <textarea id="add-inject" rows="3" style="width:100%" placeholder="Authorization: Bearer bao:upstreams/itglue#token"></textarea></label>
+      </div>
+      <div class="row">
+        <button class="btn secondary" id="add-test">Test connection</button>
+        <button class="btn" id="add-save">Add server</button>
+        <span class="muted" id="add-result"></span>
+      </div>
+      <div class="row">
+        <label style="flex:1">Search the MCP registry <input id="reg-q" placeholder="e.g. github" style="width:100%"></label>
+        <button class="btn secondary" id="reg-search">Search</button>
+      </div>
+      <div id="reg-results"></div>
+    </section>`;
+
+  $("#add-type").onchange = () => {
+    const t = $("#add-type").value;
+    $("#add-http").classList.toggle("hidden", t !== "http");
+    $("#add-npm").classList.toggle("hidden", t !== "npm");
+    $("#add-docker").classList.toggle("hidden", t !== "docker");
+  };
+
+  const buildSpec = () => {
+    const t = $("#add-type").value;
+    const id = $("#add-id").value.trim(), namespace = $("#add-ns").value.trim();
+    const inject = {};
+    $("#add-inject").value.split("\n").map(l => l.trim()).filter(Boolean).forEach(l => {
+      const i = l.indexOf(":"); if (i > 0) inject[l.slice(0, i).trim()] = l.slice(i + 1).trim();
+    });
+    if (t === "http") return { id, namespace, transport: "http", url: $("#add-url").value.trim(), headers: inject };
+    if (t === "npm") {
+      const pkg = $("#add-pkg").value.trim(), ver = $("#add-ver").value.trim() || "latest";
+      return { id, namespace, transport: "stdio", command: "npx", args: ["-y", `${pkg}@${ver}`], env: inject };
+    }
+    const img = $("#add-img").value.trim();
+    const args = ["run", "-i", "--rm"];
+    Object.keys(inject).forEach(k => args.push("-e", k)); // value stays in spawn env, not argv
+    args.push(img);
+    return { id, namespace, transport: "stdio", command: "docker", args, env: inject };
+  };
+
+  $("#add-test").onclick = async () => {
+    $("#add-result").textContent = "testing…";
+    try {
+      const r = await api("/preflight", { method: "POST", body: JSON.stringify(buildSpec()) });
+      $("#add-result").textContent = r.ok ? `✓ ${r.toolCount} tools: ${r.tools.slice(0,8).join(", ")}${r.toolCount>8?"…":""}` : `✗ ${r.error}`;
+    } catch (e) { $("#add-result").textContent = "✗ " + e.message; }
+  };
+  $("#add-save").onclick = async () => {
+    try {
+      const spec = buildSpec();
+      await api("/upstreams", { method: "POST", body: JSON.stringify(spec) });
+      toast(`Upstream "${spec.id}" saved`); renderUpstreams();
+    } catch (e) { toast(e.message, true); }
+  };
+  $("#reg-search").onclick = async () => {
+    $("#reg-results").innerHTML = '<p class="muted">searching…</p>';
+    try {
+      const r = await api("/registry/search?q=" + encodeURIComponent($("#reg-q").value.trim()));
+      const servers = r.servers || [];
+      $("#reg-results").innerHTML = servers.length ? `<table>
+        ${servers.map(s => {
+          const pkg = (s.packages || []).find(p => p.registry_type === "npm" || p.registryType === "npm");
+          const name = s.name || (s.server && s.server.name) || "";
+          const desc = s.description || (s.server && s.server.description) || "";
+          return `<tr><td class="mono">${esc(name)}</td><td class="muted">${esc(desc)}</td>
+            <td>${pkg ? `<button class="btn secondary" data-pkg="${esc(pkg.identifier || pkg.name)}">Use</button>` : ""}</td></tr>`;
+        }).join("")}</table>` : '<p class="muted">no results</p>';
+      $$("#reg-results [data-pkg]").forEach(b => b.onclick = () => {
+        $("#add-type").value = "npm"; $("#add-type").onchange();
+        $("#add-pkg").value = b.dataset.pkg;
+      });
+    } catch (e) { $("#reg-results").innerHTML = `<p class="muted">✗ ${esc(e.message)}</p>`; }
+  };
+  el.onclick = async (ev) => {
+    const b = ev.target.closest("[data-act]"); if (!b) return;
+    try {
+      if (b.dataset.act === "toggle") {
+        await api(`/upstreams/${b.dataset.id}/enabled`, { method: "POST", body: JSON.stringify({ enabled: b.dataset.en === "true" }) });
+      } else if (b.dataset.act === "delete") {
+        if (!confirm(`Delete upstream "${b.dataset.id}"? Its grants and tool settings are removed too.`)) return;
+        await api(`/upstreams/${b.dataset.id}`, { method: "DELETE" });
+      }
+      renderUpstreams();
+    } catch (e) { toast(e.message, true); }
+  };
+}
+
+// ── Tools ──
+async function renderTools() {
+  const el = $("#tab-tools");
+  const tools = await api("/catalog");
+  el.innerHTML = `<section class="panel"><h2>Tool catalog (${tools.length})</h2>
+    <table>
+      <tr><th>On</th><th>Tool</th><th>Upstream</th><th>Tier</th><th>Override</th><th>Group</th></tr>
+      ${tools.map(t => `<tr>
+        <td><input type="checkbox" data-u="${esc(t.upstreamId)}" data-t="${esc(t.toolName)}" data-k="enabled" ${t.enabled ? "checked" : ""}></td>
+        <td class="mono" title="${esc(t.description)}">${esc(t.exposedName)}</td>
+        <td class="muted">${esc(t.upstreamId)}</td>
+        <td>${tierPill(t.derivedTier)}</td>
+        <td><select data-u="${esc(t.upstreamId)}" data-t="${esc(t.toolName)}" data-k="tierOverride">
+          <option value="">(derived)</option>
+          ${["read","write","destructive"].map(x => `<option ${t.tierOverride===x?"selected":""}>${x}</option>`).join("")}
+        </select></td>
+        <td><input size="10" placeholder="—" value="${esc(t.groupLabel||"")}" data-u="${esc(t.upstreamId)}" data-t="${esc(t.toolName)}" data-k="groupLabel"></td>
+      </tr>`).join("")}
+    </table></section>`;
+  el.onchange = async (ev) => {
+    const i = ev.target; if (!i.dataset.k) return;
+    const patch = {};
+    if (i.dataset.k === "enabled") patch.enabled = i.checked;
+    else if (i.dataset.k === "tierOverride") patch.tierOverride = i.value || null;
+    else patch.groupLabel = i.value.trim() || null;
+    try {
+      await api(`/catalog/${encodeURIComponent(i.dataset.u)}/${encodeURIComponent(i.dataset.t)}`, { method: "PATCH", body: JSON.stringify(patch) });
+      toast("Saved");
+    } catch (e) { toast(e.message, true); }
+  };
+}
+
+// ── Roles ──
+async function renderRoles() {
+  const el = $("#tab-roles");
+  const [{ roles, grants }, upstreams] = await Promise.all([api("/roles"), api("/upstreams")]);
+  const grantFor = (r, u) => (grants.find(g => g.roleId === r && g.upstreamId === u) || {}).maxTier || "";
+  el.innerHTML = `
+    <section class="panel"><h2>Roles × upstream access (max tier)</h2>
+      <table>
+        <tr><th>Role</th><th>Default</th>${upstreams.map(u => `<th class="mono">${esc(u.id)}</th>`).join("")}<th></th></tr>
+        ${roles.map(r => `<tr>
+          <td>${esc(r.name)} ${r.isAdmin ? '<span class="pill">admin</span>' : ""}</td>
+          <td>${tierPill(r.defaultMaxTier)}</td>
+          ${upstreams.map(u => `<td><select data-r="${r.id}" data-u="${esc(u.id)}">
+            <option value="">(default)</option>
+            ${["none","read","write","destructive"].map(x => `<option ${grantFor(r.id, u.id)===x?"selected":""}>${x}</option>`).join("")}
+          </select></td>`).join("")}
+          <td>${r.protected ? "" : `<button class="btn danger" data-del-role="${r.id}">Delete</button>`}</td>
+        </tr>`).join("")}
+      </table>
+    </section>
+    <section class="panel"><h2>New role</h2>
+      <div class="row">
+        <label>Name <input id="role-name" placeholder="dispatch"></label>
+        <label>Default max tier <select id="role-tier">
+          ${["none","read","write","destructive"].map(x => `<option>${x}</option>`).join("")}
+        </select></label>
+        <button class="btn" id="role-add">Create</button>
+      </div>
+      <p class="muted">Per-tool allow/deny overrides for a role are set from the Tools data via the API (<code>PUT /api/overrides</code>).</p>
+    </section>`;
+  el.onchange = async (ev) => {
+    const s = ev.target; if (s.dataset.r === undefined) return;
+    try {
+      await api("/grants", { method: "PUT", body: JSON.stringify({ roleId: Number(s.dataset.r), upstreamId: s.dataset.u, maxTier: s.value || null }) });
+      toast("Saved");
+    } catch (e) { toast(e.message, true); }
+  };
+  el.onclick = async (ev) => {
+    const b = ev.target.closest("[data-del-role]"); if (!b) return;
+    if (!confirm("Delete this role?")) return;
+    try { await api("/roles/" + b.dataset.delRole, { method: "DELETE" }); renderRoles(); }
+    catch (e) { toast(e.message, true); }
+  };
+  $("#role-add").onclick = async () => {
+    try {
+      await api("/roles", { method: "POST", body: JSON.stringify({ name: $("#role-name").value.trim(), defaultMaxTier: $("#role-tier").value }) });
+      renderRoles();
+    } catch (e) { toast(e.message, true); }
+  };
+}
+
+// ── Users ──
+async function renderUsers() {
+  const el = $("#tab-users");
+  const [users, { roles }, mappings] = await Promise.all([api("/users"), api("/roles"), api("/group-mappings")]);
+  const roleOpts = (sel) => `<option value="">(none)</option>` +
+    roles.map(r => `<option value="${r.id}" ${sel===r.id?"selected":""}>${esc(r.name)}</option>`).join("");
+  el.innerHTML = `
+    <section class="panel"><h2>Users (OIDC logins)</h2>
+      ${users.length ? `<table>
+        <tr><th>User</th><th>Subject</th><th>Last login</th><th>Role</th></tr>
+        ${users.map(u => `<tr>
+          <td>${esc(u.displayName || u.email || "—")}</td>
+          <td class="mono">${esc(u.email || u.sub)}</td>
+          <td class="muted">${esc(u.lastLoginAt || "")}</td>
+          <td><select data-user="${u.id}">${roleOpts(u.roleId)}</select></td>
+        </tr>`).join("")}</table>` : '<p class="muted">No OIDC logins yet.</p>'}
+    </section>
+    <section class="panel"><h2>Group → role mappings</h2>
+      ${mappings.length ? `<table>
+        <tr><th>Issuer</th><th>Group claim</th><th>Role</th><th></th></tr>
+        ${mappings.map(m => `<tr><td class="mono">${esc(m.iss)}</td><td class="mono">${esc(m.claimValue)}</td>
+          <td>${esc((roles.find(r => r.id === m.roleId) || {}).name || m.roleId)}</td>
+          <td><button class="btn danger" data-del-map="${m.id}">Delete</button></td></tr>`).join("")}</table>` : '<p class="muted">No mappings.</p>'}
+      <div class="row" style="margin-top:10px">
+        <label style="flex:2">Issuer <input id="map-iss" placeholder="https://login.microsoftonline.com/…/v2.0" style="width:100%"></label>
+        <label>Group / claim value <input id="map-claim" placeholder="group object id"></label>
+        <label>Role <select id="map-role">${roles.map(r => `<option value="${r.id}">${esc(r.name)}</option>`).join("")}</select></label>
+        <button class="btn" id="map-add">Add</button>
+      </div>
+    </section>`;
+  el.onchange = async (ev) => {
+    const s = ev.target; if (!s.dataset.user) return;
+    try {
+      await api(`/users/${s.dataset.user}/role`, { method: "PUT", body: JSON.stringify({ roleId: s.value ? Number(s.value) : null }) });
+      toast("Saved");
+    } catch (e) { toast(e.message, true); }
+  };
+  el.onclick = async (ev) => {
+    const b = ev.target.closest("[data-del-map]"); if (!b) return;
+    try { await api("/group-mappings/" + b.dataset.delMap, { method: "DELETE" }); renderUsers(); }
+    catch (e) { toast(e.message, true); }
+  };
+  $("#map-add").onclick = async () => {
+    try {
+      await api("/group-mappings", { method: "PUT", body: JSON.stringify({
+        iss: $("#map-iss").value.trim(), claimValue: $("#map-claim").value.trim(),
+        roleId: Number($("#map-role").value) }) });
+      renderUsers();
+    } catch (e) { toast(e.message, true); }
+  };
+}
+
+// ── Secrets ──
+async function renderSecrets() {
+  const el = $("#tab-secrets");
+  const health = await api("/secrets/health");
+  el.innerHTML = `
+    <section class="panel"><h2>Secret store</h2>
+      <p>${dot(health.ok)}${esc(health.detail)}</p>
+      <p class="muted">Values are written straight to OpenBao and never stored or displayed by the gateway.
+      Reference them in upstream headers/env as <code>bao:&lt;path&gt;#&lt;field&gt;</code>.</p>
+      <div class="row">
+        <label>Path <input id="sec-path" placeholder="upstreams/itglue"></label>
+        <label>Field <input id="sec-field" placeholder="token"></label>
+        <label style="flex:1">Value <input id="sec-value" type="password" style="width:100%"></label>
+        <button class="btn" id="sec-save" ${health.ok ? "" : "disabled"}>Save</button>
+      </div>
+      <p class="mono" id="sec-result"></p>
+    </section>`;
+  $("#sec-save").onclick = async () => {
+    try {
+      const r = await api("/secrets", { method: "PUT", body: JSON.stringify({
+        path: $("#sec-path").value.trim(), field: $("#sec-field").value.trim(),
+        value: $("#sec-value").value }) });
+      $("#sec-value").value = "";
+      $("#sec-result").textContent = "Saved → " + r.ref;
+    } catch (e) { toast(e.message, true); }
+  };
+}
+
+const RENDER = { status: renderStatus, upstreams: renderUpstreams, tools: renderTools,
+  roles: renderRoles, users: renderUsers, secrets: renderSecrets };
+
+if (TOKEN) login(TOKEN);
+</script>
+</body>
+</html>
