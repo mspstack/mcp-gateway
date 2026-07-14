@@ -3,7 +3,12 @@
 import type { SecretRef, SecretStore } from "./store.js";
 
 export class MemorySecretStore implements SecretStore {
+  readonly scheme = "bao" as const;
   private readonly secrets = new Map<string, Map<string, string>>();
+
+  refFor(path: string, field: string): string {
+    return `bao:${path}#${field}`;
+  }
 
   async get(ref: SecretRef): Promise<string> {
     const value = this.secrets.get(ref.path)?.get(ref.field);

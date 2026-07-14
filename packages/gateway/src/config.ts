@@ -15,11 +15,14 @@
  *   ADMIN_BOOTSTRAP_SUBJECTS         comma list of emails/subs granted admin on first OIDC login
  *   DEV_ALLOW_UNAUTHENTICATED=true   explicit localhost-dev escape hatch (admin role)
  *
- * Secrets (OpenBao / Vault, optional — enables "bao:path#field" refs):
+ * Secrets (one store at a time, optional):
  *   BAO_ADDR, BAO_MOUNT (default "mspstack"), BAO_TOKEN or BAO_ROLE_ID+BAO_SECRET_ID
+ *     — OpenBao / Vault KV v2, enables "bao:path#field" refs
+ *   KEY_VAULT_URI (https://<vault>.vault.azure.net)
+ *     — Azure Key Vault via DefaultAzureCredential, enables "kv:secret-name" refs
  *
  * Upstream header/env values support `${VAR}` env substitution and
- * `bao:path#field` secret refs — both resolved at connect time, never stored.
+ * `bao:`/`kv:` secret refs — all resolved at connect time, never stored.
  */
 
 import { readFileSync } from "node:fs";
@@ -86,6 +89,10 @@ export interface BaoConfig {
   secretId?: string;
 }
 
+export interface KeyVaultConfig {
+  vaultUrl: string;
+}
+
 export interface GatewayConfig {
   port: number;
   publicUrl: string;
@@ -98,6 +105,7 @@ export interface GatewayConfig {
   adminBootstrapSubjects: string[];
   devAllowUnauthenticated: boolean;
   bao: BaoConfig | null;
+  keyVault: KeyVaultConfig | null;
 }
 
 /** Substitute `${VAR}` references from env; unset variables are a hard error. */
@@ -290,6 +298,21 @@ export function loadConfig(
     };
   }
 
+  // ── Azure Key Vault ──
+  const keyVaultUri = cleanEnv(env.KEY_VAULT_URI);
+  let keyVault: KeyVaultConfig | null = null;
+  if (keyVaultUri) {
+    if (bao) {
+      throw new ConfigError(
+        "Both BAO_ADDR and KEY_VAULT_URI are set — the gateway serves one ref scheme at a time; unset one"
+      );
+    }
+    if (!/^https:\/\//i.test(keyVaultUri)) {
+      throw new ConfigError(`KEY_VAULT_URI must be an https:// vault URL, got "${keyVaultUri}"`);
+    }
+    keyVault = { vaultUrl: keyVaultUri.replace(/\/+$/, "") };
+  }
+
   return {
     port,
     publicUrl,
@@ -305,5 +328,6 @@ export function loadConfig(
       .filter(Boolean),
     devAllowUnauthenticated: env.DEV_ALLOW_UNAUTHENTICATED === "true",
     bao,
+    keyVault,
   };
 }

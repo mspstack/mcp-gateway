@@ -43,7 +43,8 @@ docker compose -f docker/docker-compose.yml up -d
 | `MCP_TOKENS_ADMIN` / `_EDITOR` / `_VIEWER` / `_<ROLE>` | static bearer tokens, `label:token,…` |
 | `ENTRA_TENANT_ID` or `OIDC_ISSUER` + `OIDC_AUDIENCE` | OAuth 2.1 resource-server mode |
 | `ADMIN_BOOTSTRAP_SUBJECTS` | emails/subs that get admin on first OIDC login |
-| `BAO_ADDR` + `BAO_TOKEN` or `BAO_ROLE_ID`/`BAO_SECRET_ID` | OpenBao secret store |
+| `BAO_ADDR` + `BAO_TOKEN` or `BAO_ROLE_ID`/`BAO_SECRET_ID` | OpenBao secret store (`bao:path#field` refs) |
+| `KEY_VAULT_URI` | Azure Key Vault secret store via `DefaultAzureCredential` (`kv:secret-name` refs; one store at a time) |
 | `PORT`, `PUBLIC_URL`, `DB_PATH`, `ALLOWED_ORIGINS` | plumbing |
 | `DEV_ALLOW_UNAUTHENTICATED=true` | localhost-dev only; without any auth configured the gateway refuses to start |
 
