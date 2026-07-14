@@ -40,3 +40,5 @@ Self-hosted MCP manager/gateway: one streamable-HTTP `/mcp` endpoint federating 
 ## Roadmap (post-v1)
 
 Admin UI OIDC login (cookie + PKCE via openid-client; today the UI signs in with an admin bearer token) · resources/prompts federation · per-principal upstream sessions (`sessionMode`) · CIMD client registration · npm pre-install pool.
+
+**MSPStack integrated mode** — the gateway becomes runnable as a native MSPStack app: `GATEWAY_MODE=standalone|integrated` (standalone stays exactly today's behavior — never a fork), an Azure Key Vault `SecretStore` (`kv:<name>` refs, ships first, useful to both modes), a user self-service API (`/api/me/*`: narrow-only tool/server prefs + registering personal upstream creds — this is what finally consumes `sessionMode`), admin surface driven from the MSPStack control plane. Design plan lives in the MSPStack repo (private, github.com/selic/MSPStack): `docs/plans/gateway-integrated-mode.md` — slices 1/3/5 land here, 2/4 land there.
