@@ -77,7 +77,7 @@ Part of **MSPStack** — a family of MCP tooling for MSPs: [mcp-itglue](https://
 
 ## Roadmap
 
-Admin-UI OIDC login (today the UI signs in with an admin token) · resources/prompts federation · per-user upstream sessions · CIMD client registration.
+Admin-UI OIDC login (today the UI signs in with an admin token) · resources/prompts federation · per-user upstream sessions · CIMD client registration · MSPStack integrated mode (Key Vault secret store, user self-service creds/prefs, Toolbox publication — designed in the MSPStack repo, `docs/plans/gateway-integrated-mode.md`).
 
 ## Author
 
