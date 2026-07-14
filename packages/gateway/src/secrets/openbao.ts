@@ -19,9 +19,14 @@ interface CachedValue {
 }
 
 export class OpenBaoStore implements SecretStore {
+  readonly scheme = "bao" as const;
   private readonly cache = new Map<string, CachedValue>();
   private clientToken: string | null = null;
   private tokenExpiresAt = 0;
+
+  refFor(path: string, field: string): string {
+    return `bao:${path}#${field}`;
+  }
 
   constructor(
     private readonly config: BaoConfig,

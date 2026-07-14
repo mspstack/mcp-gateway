@@ -16,7 +16,7 @@ Self-hosted MCP manager/gateway: one streamable-HTTP `/mcp` endpoint federating 
 - `domain/catalog.ts` — namespacing (`${namespace}_${tool}`, no double-prefix), routing map (no string-splitting), annotation-derived tiers (port of mcp-itglue `tierOf`)
 - `domain/policy.ts` — `PolicyService`: toolEnabled ∧ (override(allow) ∨ (tier ≤ maxTier ∧ ¬deny)); maxTier = per-upstream grant ?? role default. Same function gates tools/list AND tools/call
 - `auth/` — `static-tokens.ts` (timing-safe bearer match), `oidc.ts` (jose JWKS, issuer/aud/exp validation, groups claim), `prm.ts` (RFC 9728 doc + WWW-Authenticate), `principal.ts` (session binding key)
-- `secrets/` — `SecretStore` interface, `openbao.ts` (KV v2, AppRole or token, 5-min cache), `memory.ts` (tests). Refs: `bao:path#field`; env refs: `${VAR}` — both resolved only at upstream connect time
+- `secrets/` — `SecretStore` interface (scheme-tagged: `bao` | `kv`), `openbao.ts` (KV v2, AppRole or token, 5-min cache), `keyvault.ts` (Azure Key Vault, `DefaultAzureCredential`, lazy SDK import, same 5-min cache; `put(path, field)` writes `path-field`), `memory.ts` (tests). Refs: `bao:path#field` / `kv:secret-name`; env refs: `${VAR}` — all resolved only at upstream connect time. One store at a time (`BAO_ADDR` xor `KEY_VAULT_URI`)
 - `upstream/connection.ts` — one pooled SDK `Client` per upstream; header/env injection; backoff reconnect (1s→60s) + `onRecovered`; retry-once on dropped transport
 - `upstream/manager.ts` — policy-free catalog owner; hot `upsertUpstream`/`removeUpstream`; `summaries()` for the UI
 - `mcp/gateway-server.ts` — low-level SDK `Server` per session, closes over the Principal; unknown and forbidden tools get the same error (no existence oracle)

@@ -16,6 +16,7 @@ import { Repo } from "./db/repo.js";
 import { PolicyService } from "./domain/policy.js";
 import { createOidcVerifier } from "./auth/oidc.js";
 import { OpenBaoStore } from "./secrets/openbao.js";
+import { createKeyVaultStore } from "./secrets/keyvault.js";
 import { UpstreamConnection } from "./upstream/connection.js";
 import { UpstreamManager } from "./upstream/manager.js";
 import { createApp } from "./http/app.js";
@@ -62,13 +63,18 @@ async function main(): Promise<void> {
   }
 
   // ── secrets ──
-  const secretStore = config.bao ? new OpenBaoStore(config.bao) : null;
+  const secretStore = config.bao
+    ? new OpenBaoStore(config.bao)
+    : config.keyVault
+      ? await createKeyVaultStore(config.keyVault.vaultUrl)
+      : null;
   if (secretStore) {
+    const label = secretStore.scheme === "kv" ? "Key Vault" : "OpenBao";
     const health = await secretStore.health();
     console.error(
       health.ok
-        ? `[secrets] OpenBao ${health.detail}`
-        : `[secrets] WARNING: OpenBao unhealthy (${health.detail}) — bao: refs will fail until it recovers`
+        ? `[secrets] ${label} ${health.detail}`
+        : `[secrets] WARNING: ${label} unhealthy (${health.detail}) — ${secretStore.scheme}: refs will fail until it recovers`
     );
   }
 

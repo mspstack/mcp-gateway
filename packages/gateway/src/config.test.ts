@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ConfigError,
+  loadConfig,
   parseConfigFile,
   parseStaticTokens,
   substituteEnv,
@@ -132,5 +133,33 @@ describe("parseStaticTokens", () => {
       SOMETHING_ELSE: "x:y",
     } as NodeJS.ProcessEnv);
     expect(entries).toEqual([]);
+  });
+});
+
+describe("loadConfig — KEY_VAULT_URI", () => {
+  const load = (env: Record<string, string>) => loadConfig([], env as NodeJS.ProcessEnv);
+
+  it("parses KEY_VAULT_URI into keyVault config, trimming trailing slashes", () => {
+    const config = load({ KEY_VAULT_URI: "https://example-kv.vault.azure.net/" });
+    expect(config.keyVault).toEqual({ vaultUrl: "https://example-kv.vault.azure.net" });
+    expect(config.bao).toBeNull();
+  });
+
+  it("leaves keyVault null when unset", () => {
+    expect(load({}).keyVault).toBeNull();
+  });
+
+  it("rejects non-https vault URLs", () => {
+    expect(() => load({ KEY_VAULT_URI: "http://example-kv.vault.azure.net" })).toThrow(ConfigError);
+  });
+
+  it("refuses BAO_ADDR and KEY_VAULT_URI together — one ref scheme at a time", () => {
+    expect(() =>
+      load({
+        KEY_VAULT_URI: "https://example-kv.vault.azure.net",
+        BAO_ADDR: "http://127.0.0.1:8200",
+        BAO_TOKEN: "dev",
+      })
+    ).toThrow(/one ref scheme at a time/);
   });
 });
