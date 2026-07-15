@@ -16,6 +16,7 @@
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "npm run build",
+    "prepack": "node -e \"const fs=require('fs'),p=require('path');for(const f of['README.md','LICENSE'])fs.copyFileSync(p.join('..','..',f),f)\"",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "test": "vitest run",
