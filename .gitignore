@@ -6,3 +6,7 @@ dist/
 .env.*
 mspstack.config.local.json
 data/
+# copied from the repo root by the gateway package's prepack script
+packages/gateway/README.md
+packages/gateway/LICENSE
+*.tgz
