@@ -56,6 +56,7 @@ const config: GatewayConfig = {
     { token: "tok-editor", roleName: "editor", label: "bob" },
   ],
   oidc: null,
+  login: null,
   adminBootstrapSubjects: [],
   devAllowUnauthenticated: false,
   bao: null,

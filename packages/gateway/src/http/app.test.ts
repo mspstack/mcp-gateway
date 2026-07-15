@@ -55,6 +55,7 @@ const config: GatewayConfig = {
     { token: "tok-admin", roleName: "admin", label: "root" },
   ],
   oidc: null,
+  login: null,
   adminBootstrapSubjects: [],
   devAllowUnauthenticated: false,
   bao: null,

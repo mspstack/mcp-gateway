@@ -25,13 +25,26 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { GatewayConfig } from "../config.js";
-import type { Repo } from "../db/repo.js";
+import type { Repo, RoleRow, UserRow } from "../db/repo.js";
 import type { PolicyService } from "../domain/policy.js";
 import type { UpstreamManager } from "../upstream/manager.js";
 import type { SecretStore } from "../secrets/store.js";
-import type { OidcVerifier } from "../auth/oidc.js";
+import type { OidcVerifier, OidcIdentity } from "../auth/oidc.js";
 import { authenticateStaticToken, bearerToken } from "../auth/static-tokens.js";
 import { prefsIdentity, principalKey, type Principal } from "../auth/principal.js";
+import {
+  SESSION_COOKIE,
+  TRANSIENT_COOKIE,
+  SESSION_MAX_AGE_MS,
+  TRANSIENT_MAX_AGE_MS,
+  parseCookies,
+  readSessionClaims,
+  readTransientState,
+  mintSessionCookieValue,
+  mintTransientCookieValue,
+  safeReturnTo,
+  type LoginService,
+} from "../auth/login.js";
 import { PRM_PATH, prmDocument, wwwAuthenticate } from "../auth/prm.js";
 import { createGatewayServer, SERVER_NAME, SERVER_VERSION } from "../mcp/gateway-server.js";
 import { createAdminRouter } from "./admin-api.js";
@@ -44,6 +57,8 @@ export interface AppDeps {
   policy: PolicyService;
   secretStore: SecretStore | null;
   oidcVerifier: OidcVerifier | null;
+  /** Interactive-login flow (openid-client), or null when login is unconfigured. */
+  loginService?: LoginService | null;
   /** Directory with the static admin UI, or null to skip mounting. */
   adminUiDir?: string | null;
 }
@@ -86,6 +101,42 @@ export function originAllowed(origin: string | undefined, allowedOrigins: string
   }
   if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]") return true;
   return allowedOrigins.includes(origin.replace(/\/+$/, ""));
+}
+
+/** Shared 403 message for authenticated-but-unmapped principals (bearer + cookie). */
+const NO_ROLE_MESSAGE =
+  "Authenticated, but no role is assigned — ask an administrator to map your user or group to a role.";
+
+/**
+ * The identical login side effects shared by the OIDC bearer path and the
+ * interactive-login callback: upsert the user, apply the admin bootstrap, then
+ * resolve the role. Factored out so the two paths can never drift.
+ */
+export function loginUpsert(
+  repo: Repo,
+  config: GatewayConfig,
+  identity: OidcIdentity
+): { user: UserRow; role: RoleRow | null } {
+  const user = repo.upsertUserOnLogin({
+    iss: identity.iss,
+    sub: identity.sub,
+    ...(identity.email ? { email: identity.email } : {}),
+    ...(identity.displayName ? { displayName: identity.displayName } : {}),
+  });
+  // Bootstrap: configured subjects become admin on first login (persisted as an
+  // explicit user-role override so it is visible in the UI).
+  if (user.roleId == null && config.adminBootstrapSubjects.length > 0) {
+    const candidates = [identity.email?.toLowerCase(), identity.sub.toLowerCase()];
+    if (candidates.some((c) => c && config.adminBootstrapSubjects.includes(c))) {
+      const admin = repo.roleByName("admin");
+      if (admin) {
+        repo.setUserRole(user.id, admin.id);
+        console.error(`[auth] bootstrap: granted admin to ${identity.email ?? identity.sub}`);
+      }
+    }
+  }
+  const role = repo.resolveOidcRole(identity.iss, identity.sub, identity.groups);
+  return { user, role };
 }
 
 /** Resolve the principal for a request. Exported for tests and the admin API. */
@@ -142,33 +193,9 @@ export function createAuthResolver(deps: AppDeps) {
       } catch (err) {
         return unauthorized(`Invalid token: ${err instanceof Error ? err.message : String(err)}`);
       }
-      const user = repo.upsertUserOnLogin({
-        iss: identity.iss,
-        sub: identity.sub,
-        ...(identity.email ? { email: identity.email } : {}),
-        ...(identity.displayName ? { displayName: identity.displayName } : {}),
-      });
-      // Bootstrap: configured subjects become admin on first login (persisted
-      // as an explicit user-role override so it is visible in the UI).
-      if (user.roleId == null && config.adminBootstrapSubjects.length > 0) {
-        const candidates = [identity.email?.toLowerCase(), identity.sub.toLowerCase()];
-        if (candidates.some((c) => c && config.adminBootstrapSubjects.includes(c))) {
-          const admin = repo.roleByName("admin");
-          if (admin) {
-            repo.setUserRole(user.id, admin.id);
-            console.error(`[auth] bootstrap: granted admin to ${identity.email ?? identity.sub}`);
-          }
-        }
-      }
-      const role = repo.resolveOidcRole(identity.iss, identity.sub, identity.groups);
+      const { role } = loginUpsert(repo, config, identity);
       if (!role) {
-        return {
-          ok: false,
-          status: 403,
-          code: -32003,
-          message:
-            "Authenticated, but no role is assigned — ask an administrator to map your user or group to a role.",
-        };
+        return { ok: false, status: 403, code: -32003, message: NO_ROLE_MESSAGE };
       }
       const principal: Principal = {
         kind: "oidc",
@@ -182,7 +209,35 @@ export function createAuthResolver(deps: AppDeps) {
       return { ok: true, principal };
     }
 
-    // 3. Explicit dev escape hatch.
+    // 3. Interactive-login cookie session. Only when there is no Authorization
+    // bearer (bearer paths above stay the sole path for MCP clients / CI). The
+    // cookie carries ONLY identity — the role is re-resolved here every request
+    // from the stored user row (persisted at callback time), so a session id
+    // still never carries privilege.
+    if (!token && config.login) {
+      const cookies = parseCookies(req.headers.cookie);
+      const session = readSessionClaims(cookies[SESSION_COOKIE], config.login.sessionSecret);
+      if (session) {
+        const role = repo.resolveOidcRole(session.iss, session.sub, []);
+        if (!role) {
+          return { ok: false, status: 403, code: -32003, message: NO_ROLE_MESSAGE };
+        }
+        const user = repo.userBySubject(session.iss, session.sub);
+        return {
+          ok: true,
+          principal: {
+            kind: "oidc",
+            subject: `${session.iss}|${session.sub}`,
+            label: user?.email ?? user?.displayName ?? session.sub,
+            roleId: role.id,
+            roleName: role.name,
+            isAdmin: role.isAdmin,
+          },
+        };
+      }
+    }
+
+    // 4. Explicit dev escape hatch.
     if (!token && config.devAllowUnauthenticated) {
       const admin = repo.roleByName("admin");
       if (admin) {
@@ -368,7 +423,111 @@ export function createApp(deps: AppDeps): express.Express {
     createAdminRouter(deps, { resolveAuth, onPolicyChanged: broadcastVisibility })
   );
 
+  // ── Interactive login (cookie + PKCE) ───────────────────────
+  // Only mounted when login is configured. Bearer paths are untouched.
+  const login = config.login;
+  const loginService = deps.loginService ?? null;
+  if (login && loginService) {
+    const sessionCookieOpts = {
+      httpOnly: true,
+      secure: true,
+      sameSite: "lax" as const,
+      path: "/",
+      maxAge: SESSION_MAX_AGE_MS,
+    };
+    const transientCookieOpts = {
+      httpOnly: true,
+      secure: true,
+      sameSite: "lax" as const,
+      path: "/",
+      maxAge: TRANSIENT_MAX_AGE_MS,
+    };
+
+    // GET /auth/login — build PKCE + auth URL, stash transient state in a
+    // short-lived signed cookie, 302 to the IdP.
+    app.get("/auth/login", (req: Request, res: Response) => {
+      void (async () => {
+        const returnTo = safeReturnTo(req.query.returnTo, "/me");
+        const { redirectUrl, transient } = await loginService.startAuth(returnTo);
+        res.cookie(TRANSIENT_COOKIE, mintTransientCookieValue(transient, login.sessionSecret), transientCookieOpts);
+        res.redirect(302, redirectUrl);
+      })().catch((err) => {
+        console.error(`[auth] /auth/login failed: ${String(err)}`);
+        if (!res.headersSent) res.status(500).send("Login initialization failed");
+      });
+    });
+
+    // GET /auth/callback — verify state (in the library), exchange code,
+    // validate the id-token, run the shared upsert/bootstrap/resolve, persist
+    // the resolved role so later cookie requests need no groups, set the
+    // session cookie, 302 to returnTo.
+    app.get("/auth/callback", (req: Request, res: Response) => {
+      void (async () => {
+        const cookies = parseCookies(req.headers.cookie);
+        const transient = readTransientState(cookies[TRANSIENT_COOKIE], login.sessionSecret);
+        res.clearCookie(TRANSIENT_COOKIE, { path: "/" });
+        if (!transient) {
+          res.status(400).send("Login session expired or was tampered with — please try again.");
+          return;
+        }
+        const callbackUrl = new URL(req.originalUrl, config.publicUrl);
+        let identity: OidcIdentity;
+        try {
+          identity = await loginService.completeAuth(callbackUrl, transient);
+        } catch (err) {
+          console.error(`[auth] /auth/callback exchange failed: ${String(err)}`);
+          res.status(401).send("Sign-in failed. Please try again.");
+          return;
+        }
+        const { user, role } = loginUpsert(deps.repo, config, identity);
+        // Persist the resolved role so the cookie path resolves it from the
+        // stored user row (approach b) — no privilege ever rides in the cookie.
+        if (role) deps.repo.setUserRole(user.id, role.id);
+        res.cookie(
+          SESSION_COOKIE,
+          mintSessionCookieValue({ iss: identity.iss, sub: identity.sub }, login.sessionSecret),
+          sessionCookieOpts
+        );
+        console.error(`[auth] session established for ${identity.email ?? identity.sub}`);
+        res.redirect(302, safeReturnTo(transient.returnTo, "/me"));
+      })().catch((err) => {
+        console.error(`[auth] /auth/callback failed: ${String(err)}`);
+        if (!res.headersSent) res.status(500).send("Sign-in failed");
+      });
+    });
+
+    // Logout — clear the session cookie, bounce to /me (which re-gates to login).
+    const logout = (_req: Request, res: Response): void => {
+      res.clearCookie(SESSION_COOKIE, { path: "/" });
+      res.redirect(302, "/me");
+    };
+    app.post("/auth/logout", logout);
+    app.get("/auth/logout", logout);
+
+    // Light browser-navigation gate for the user-facing pages. Only redirects
+    // HTML GETs with no session; /api/* is NOT gated (server-side auth is the
+    // real boundary). /admin is intentionally NOT gated: admin.html renders its
+    // own sign-in (Microsoft button + break-glass token box).
+    const wantsHtml = (req: Request): boolean => (req.headers.accept ?? "").includes("text/html");
+    const hasSession = (req: Request): boolean =>
+      readSessionClaims(parseCookies(req.headers.cookie)[SESSION_COOKIE], login.sessionSecret) !== null;
+    const toLogin = (res: Response, path: string): void => {
+      res.redirect(302, `/auth/login?returnTo=${encodeURIComponent(path)}`);
+    };
+
+    app.get("/", (req: Request, res: Response) => {
+      if (wantsHtml(req) && !hasSession(req)) return toLogin(res, "/me");
+      res.redirect(302, "/me");
+    });
+    app.get("/me", (req: Request, res: Response, next) => {
+      if (wantsHtml(req) && !hasSession(req)) return toLogin(res, "/me");
+      next();
+    });
+  }
+
+  // ── Static pages ─────────────────────────────────────────────
   if (deps.adminUiDir) {
+    app.use("/me", express.static(deps.adminUiDir, { index: "me.html" }));
     app.use("/admin", express.static(deps.adminUiDir, { index: "admin.html" }));
   }
 

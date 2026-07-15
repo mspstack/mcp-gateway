@@ -15,6 +15,12 @@
  *   ADMIN_BOOTSTRAP_SUBJECTS         comma list of emails/subs granted admin on first OIDC login
  *   DEV_ALLOW_UNAUTHENTICATED=true   explicit localhost-dev escape hatch (admin role)
  *
+ * Interactive login (cookie + PKCE, optional; reuses the OIDC issuer):
+ *   AUTH_CLIENT_ID                   confidential client id (the Entra login app)
+ *   AUTH_CLIENT_SECRET               its client secret
+ *   AUTH_REDIRECT_URI                callback URL (default ${PUBLIC_URL}/auth/callback)
+ *   SESSION_SECRET                   HMAC key for the session/transient cookies
+ *
  *   GATEWAY_MODE                     standalone (default) | integrated — integrated
  *                                    requires KEY_VAULT_URI + OIDC (refuses to start otherwise)
  *
@@ -93,6 +99,20 @@ export interface OidcConfig {
   groupsClaim: string;
 }
 
+/**
+ * Interactive OIDC login (cookie + PKCE). The gateway reuses the MSPStack
+ * Entra login app as a confidential client: auth-code + PKCE, id-token
+ * validation (aud = clientId), and its own signed cookie session. Requires an
+ * OIDC issuer (reuses OidcConfig.issuer for discovery); optional in standalone.
+ */
+export interface LoginConfig {
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+  /** HMAC key for the session + transient PKCE cookies (never leaves the server). */
+  sessionSecret: string;
+}
+
 export interface BaoConfig {
   addr: string;
   mount: string;
@@ -124,6 +144,8 @@ export interface GatewayConfig {
   upstreamsFromFile: UpstreamSpec[];
   staticTokens: StaticTokenEntry[];
   oidc: OidcConfig | null;
+  /** Interactive login (cookie + PKCE), or null when not configured. */
+  login: LoginConfig | null;
   adminBootstrapSubjects: string[];
   devAllowUnauthenticated: boolean;
   bao: BaoConfig | null;
@@ -299,6 +321,37 @@ export function loadConfig(
     oidc = { issuer, audience, groupsClaim: cleanEnv(env.OIDC_GROUPS_CLAIM) ?? "groups" };
   }
 
+  // ── Interactive login (cookie + PKCE via openid-client) ──
+  // Reuses the OIDC issuer for discovery; the gateway acts as a confidential
+  // client validating id-tokens (aud = AUTH_CLIENT_ID). All-or-nothing: if any
+  // login env is set they must all be, and an OIDC issuer must be configured.
+  const loginClientId = cleanEnv(env.AUTH_CLIENT_ID);
+  const loginClientSecret = cleanEnv(env.AUTH_CLIENT_SECRET);
+  const sessionSecret = cleanEnv(env.SESSION_SECRET);
+  const loginRedirectUri = cleanEnv(env.AUTH_REDIRECT_URI) ?? `${publicUrl}/auth/callback`;
+  let login: LoginConfig | null = null;
+  if (loginClientId || loginClientSecret || sessionSecret) {
+    if (!oidc) {
+      throw new ConfigError(
+        "Interactive login (AUTH_CLIENT_ID/AUTH_CLIENT_SECRET/SESSION_SECRET) requires an OIDC issuer — set OIDC_ISSUER or ENTRA_TENANT_ID (+ OIDC_AUDIENCE)"
+      );
+    }
+    if (!loginClientId || !loginClientSecret || !sessionSecret) {
+      throw new ConfigError(
+        "Interactive login is partially configured — set all of AUTH_CLIENT_ID, AUTH_CLIENT_SECRET, and SESSION_SECRET (or none)"
+      );
+    }
+    if (sessionSecret.length < 16) {
+      throw new ConfigError("SESSION_SECRET must be at least 16 characters (it keys the session cookie HMAC)");
+    }
+    login = {
+      clientId: loginClientId,
+      clientSecret: loginClientSecret,
+      redirectUri: loginRedirectUri,
+      sessionSecret,
+    };
+  }
+
   // ── OpenBao ──
   const baoAddr = cleanEnv(env.BAO_ADDR);
   let bao: BaoConfig | null = null;
@@ -363,6 +416,7 @@ export function loadConfig(
     upstreamsFromFile: parseConfigFile(raw),
     staticTokens: parseStaticTokens(env),
     oidc,
+    login,
     adminBootstrapSubjects: (env.ADMIN_BOOTSTRAP_SUBJECTS ?? "")
       .split(",")
       .map((s) => s.trim().toLowerCase())
