@@ -55,16 +55,23 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Continuous deploy: a push to main updates the :latest tag, so poke the
-      # App Service CI webhook to pull the fresh image (DOCKER_ENABLE_CI=true on
-      # the app). Only on the default branch — tag builds publish :X.Y.Z but not
-      # :latest, and are deployed deliberately via the release-mcp-server skill.
-      - name: Trigger App Service pull (main only)
+      # Continuous deploy (best-effort): a push to main updates :latest, so poke
+      # the App Service CI webhook to pull it (DOCKER_ENABLE_CI=true on the app).
+      # NON-FATAL: the webhook needs SCM basic-auth publishing enabled on the app;
+      # NDR org policy disables it, so this 401s and auto-deploy falls back to the
+      # manual/skill path (release-mcp-server). Kept wired so it "just works" if
+      # basic auth is ever enabled. Only on the default branch.
+      - name: Trigger App Service pull (main only, best-effort)
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        continue-on-error: true
         run: |
           if [ -z "${{ secrets.AZURE_DEPLOY_WEBHOOK }}" ]; then
             echo "AZURE_DEPLOY_WEBHOOK not set — skipping auto-deploy"; exit 0
           fi
           code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${{ secrets.AZURE_DEPLOY_WEBHOOK }}")
           echo "webhook responded HTTP $code"
-          [ "$code" -ge 200 ] && [ "$code" -lt 400 ] || { echo "webhook failed"; exit 1; }
+          if [ "$code" -ge 200 ] && [ "$code" -lt 400 ]; then
+            echo "auto-deploy triggered"
+          else
+            echo "::warning::webhook HTTP $code — auto-deploy skipped (SCM basic-auth publishing likely disabled); deploy via release-mcp-server"
+          fi
