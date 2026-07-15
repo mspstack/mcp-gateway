@@ -54,3 +54,17 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Continuous deploy: a push to main updates the :latest tag, so poke the
+      # App Service CI webhook to pull the fresh image (DOCKER_ENABLE_CI=true on
+      # the app). Only on the default branch — tag builds publish :X.Y.Z but not
+      # :latest, and are deployed deliberately via the release-mcp-server skill.
+      - name: Trigger App Service pull (main only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          if [ -z "${{ secrets.AZURE_DEPLOY_WEBHOOK }}" ]; then
+            echo "AZURE_DEPLOY_WEBHOOK not set — skipping auto-deploy"; exit 0
+          fi
+          code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${{ secrets.AZURE_DEPLOY_WEBHOOK }}")
+          echo "webhook responded HTTP $code"
+          [ "$code" -ge 200 ] && [ "$code" -lt 400 ] || { echo "webhook failed"; exit 1; }
