@@ -15,6 +15,7 @@ import { openDatabase } from "./db/index.js";
 import { Repo } from "./db/repo.js";
 import { PolicyService } from "./domain/policy.js";
 import { createOidcVerifier } from "./auth/oidc.js";
+import { createLoginService } from "./auth/login.js";
 import { OpenBaoStore } from "./secrets/openbao.js";
 import { createKeyVaultStore } from "./secrets/keyvault.js";
 import { UpstreamConnection } from "./upstream/connection.js";
@@ -81,6 +82,15 @@ async function main(): Promise<void> {
   // ── OIDC verifier ──
   const oidcVerifier = config.oidc ? createOidcVerifier(config.oidc) : null;
 
+  // ── Interactive login (cookie + PKCE) ──
+  const loginService =
+    config.login && config.oidc ? createLoginService(config.oidc, config.login) : null;
+  if (config.login) {
+    console.error(
+      `[auth] interactive login enabled: client=${config.login.clientId} redirect=${config.login.redirectUri}`
+    );
+  }
+
   // ── upstreams ──
   const specs = repo.listUpstreams().map((row) => row.spec);
   const manager = new UpstreamManager(specs, (spec) => new UpstreamConnection(spec, secretStore));
@@ -95,11 +105,15 @@ async function main(): Promise<void> {
     policy,
     secretStore,
     oidcVerifier,
+    loginService,
     adminUiDir: existsSync(adminUiDir) ? adminUiDir : null,
   });
   const httpServer = app.listen(config.port, () => {
     console.error(`[gateway] MCP endpoint  http://localhost:${config.port}/mcp`);
     console.error(`[gateway] admin UI      http://localhost:${config.port}/admin`);
+    if (config.login) {
+      console.error(`[gateway] user page     http://localhost:${config.port}/me`);
+    }
   });
 
   const shutdown = (signal: string): void => {

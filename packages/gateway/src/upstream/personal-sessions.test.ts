@@ -77,6 +77,7 @@ const config: GatewayConfig = {
     { token: "tok-bob", roleName: "viewer", label: "bob" },
   ],
   oidc: null,
+  login: null,
   adminBootstrapSubjects: [],
   devAllowUnauthenticated: false,
   bao: null,

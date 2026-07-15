@@ -70,10 +70,13 @@
 <div id="login" class="panel section">
   <section class="panel">
     <h2>Admin sign in</h2>
-    <p class="muted">Paste an <b>admin bearer token</b> (a static <code>MCP_TOKENS_ADMIN</code> token or an OIDC access token for this gateway).</p>
+    <div class="row">
+      <a class="btn" id="oidc-btn" href="/auth/login?returnTo=/admin">Sign in with Microsoft</a>
+    </div>
+    <p class="muted">Or paste an <b>admin bearer token</b> (a static <code>MCP_TOKENS_ADMIN</code> token or an OIDC access token for this gateway) — break-glass for when interactive login is unavailable.</p>
     <div class="row">
       <input id="token-input" type="password" placeholder="admin token" style="flex:1">
-      <button class="btn" id="login-btn">Sign in</button>
+      <button class="btn secondary" id="login-btn">Sign in with token</button>
     </div>
     <p class="muted" id="login-error"></p>
   </section>
@@ -116,8 +119,9 @@ function toast(msg, isError=false) {
 
 async function api(path, opts={}) {
   const res = await fetch("/api" + path, {
+    credentials: "include", // use the cookie session when present
     ...opts,
-    headers: { "Authorization": "Bearer " + TOKEN,
+    headers: { ...(TOKEN ? {"Authorization": "Bearer " + TOKEN} : {}),
       ...(opts.body ? {"Content-Type": "application/json"} : {}), ...(opts.headers||{}) },
   });
   if (res.status === 401 || res.status === 403) { logout(); throw new Error("Unauthorized"); }
@@ -148,7 +152,10 @@ async function login(token) {
 
 $("#login-btn").onclick = () => login($("#token-input").value.trim());
 $("#token-input").addEventListener("keydown", e => { if (e.key === "Enter") $("#login-btn").click(); });
-$("#logout").onclick = logout;
+// Explicit sign-out also clears any server-side cookie session.
+$("#logout").onclick = () => {
+  fetch("/auth/logout", { method: "POST", credentials: "include" }).catch(() => {}).finally(logout);
+};
 
 $$("nav button").forEach(b => b.onclick = () => showTab(b.dataset.tab));
 function showTab(name) {
@@ -480,7 +487,17 @@ async function renderSecrets() {
 const RENDER = { status: renderStatus, upstreams: renderUpstreams, tools: renderTools,
   roles: renderRoles, users: renderUsers, secrets: renderSecrets };
 
-if (TOKEN) login(TOKEN);
+async function boot() {
+  if (TOKEN) { login(TOKEN); return; }
+  // No pasted token — try an existing cookie session (Sign in with Microsoft).
+  try {
+    await api("/status");
+    $("#login").classList.add("hidden"); $("#app").classList.remove("hidden");
+    $("#logout").classList.remove("hidden");
+    showTab("status");
+  } catch { /* no cookie session — leave the sign-in screen visible */ }
+}
+boot();
 </script>
 </body>
 </html>

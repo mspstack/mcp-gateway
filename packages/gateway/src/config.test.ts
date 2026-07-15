@@ -198,3 +198,48 @@ describe("loadConfig — GATEWAY_MODE", () => {
     expect(() => load(env)).toThrow(/requires OIDC/);
   });
 });
+
+describe("loadConfig — interactive login", () => {
+  const load = (env: Record<string, string>) => loadConfig([], env as NodeJS.ProcessEnv);
+  const fullLogin = {
+    OIDC_ISSUER: "https://login.microsoftonline.com/t/v2.0",
+    OIDC_AUDIENCE: "api://gateway",
+    AUTH_CLIENT_ID: "login-client",
+    AUTH_CLIENT_SECRET: "login-secret",
+    SESSION_SECRET: "0123456789abcdef0",
+    PUBLIC_URL: "https://gw.example",
+  };
+
+  it("is null when no login env is set", () => {
+    expect(load({ OIDC_ISSUER: "https://idp/", OIDC_AUDIENCE: "a" }).login).toBeNull();
+  });
+
+  it("parses a full login block and defaults the redirect URI from PUBLIC_URL", () => {
+    const { login } = load(fullLogin);
+    expect(login).toEqual({
+      clientId: "login-client",
+      clientSecret: "login-secret",
+      redirectUri: "https://gw.example/auth/callback",
+      sessionSecret: "0123456789abcdef0",
+    });
+  });
+
+  it("honors an explicit AUTH_REDIRECT_URI", () => {
+    const { login } = load({ ...fullLogin, AUTH_REDIRECT_URI: "https://gw.example/cb" });
+    expect(login?.redirectUri).toBe("https://gw.example/cb");
+  });
+
+  it("rejects a partial login block (all-or-nothing)", () => {
+    const { SESSION_SECRET: _omit, ...env } = fullLogin;
+    expect(() => load(env)).toThrow(/partially configured/);
+  });
+
+  it("requires an OIDC issuer for interactive login", () => {
+    const { OIDC_ISSUER: _o, OIDC_AUDIENCE: _a, ...env } = fullLogin;
+    expect(() => load(env)).toThrow(/requires an OIDC issuer/);
+  });
+
+  it("rejects a too-short SESSION_SECRET", () => {
+    expect(() => load({ ...fullLogin, SESSION_SECRET: "short" })).toThrow(/at least 16/);
+  });
+});

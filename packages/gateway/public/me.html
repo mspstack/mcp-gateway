@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My MCP Access — MSPStack Gateway</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #171d24; --panel2: #1e2630; --border: #2a3441;
+    --text: #d8dee6; --muted: #8a97a5; --accent: #4da3ff; --ok: #3fb96a;
+    --warn: #e0a23c; --err: #e05c5c; --radius: 8px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 22px;
+    background: var(--panel); border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .spacer { flex: 1; }
+  main { padding: 18px 22px; max-width: 1000px; }
+  section.panel { background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 16px; margin-bottom: 16px; }
+  h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); text-transform: uppercase;
+    letter-spacing: .06em; }
+  h3 { font-size: 13px; margin: 14px 0 8px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  tr:last-child td { border-bottom: none; }
+  input, select, textarea { background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; font-size: 13px; }
+  input:focus, select:focus { outline: 1px solid var(--accent); }
+  button.btn { background: var(--accent); color: #06121f; border: none; border-radius: 6px;
+    padding: 7px 14px; font-weight: 600; cursor: pointer; font-size: 13px; }
+  button.btn.secondary { background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); }
+  button.btn.danger { background: var(--err); color: #fff; }
+  button.btn:disabled { opacity: .5; cursor: default; }
+  a.btn { text-decoration: none; display: inline-block; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px;
+    background: var(--panel2); border: 1px solid var(--border); color: var(--muted); }
+  .pill.read { color: var(--ok); } .pill.write { color: var(--warn); }
+  .pill.destructive { color: var(--err); }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; margin-bottom: 10px; }
+  .row label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+  .muted { color: var(--muted); } .mono { font-family: ui-monospace, monospace; font-size: 12px; }
+  code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-family: ui-monospace, monospace; }
+  pre { background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px 12px; overflow-x: auto; font-size: 12px; margin: 0; }
+  #toast { position: fixed; bottom: 20px; right: 20px; background: var(--panel2);
+    border: 1px solid var(--border); border-left: 3px solid var(--accent); padding: 10px 16px;
+    border-radius: 6px; display: none; max-width: 420px; }
+  #toast.err { border-left-color: var(--err); }
+  /* iOS-style toggle */
+  .toggle { position: relative; display: inline-block; width: 38px; height: 20px; vertical-align: middle; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .toggle .slider { position: absolute; inset: 0; background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 20px; transition: .15s; cursor: pointer; }
+  .toggle .slider::before { content: ""; position: absolute; height: 14px; width: 14px; left: 2px; top: 2px;
+    background: var(--muted); border-radius: 50%; transition: .15s; }
+  .toggle input:checked + .slider { background: rgba(77,163,255,.25); border-color: var(--accent); }
+  .toggle input:checked + .slider::before { transform: translateX(18px); background: var(--accent); }
+  .tools { margin: 4px 0 0 12px; }
+  .tools td { border-bottom: 1px dashed var(--border); }
+  .off { opacity: .55; }
+</style>
+</head>
+<body>
+<header>
+  <h1>My MCP Access</h1>
+  <span id="whoami" class="muted"></span>
+  <div class="spacer"></div>
+  <button class="btn secondary" id="logout">Sign out</button>
+</header>
+
+<main>
+  <div id="access"></div>
+  <div id="credentials"></div>
+  <div id="connect"></div>
+</main>
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $ = (sel, el=document) => el.querySelector(sel);
+const $$ = (sel, el=document) => [...el.querySelectorAll(sel)];
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function toast(msg, isError=false) {
+  const el = $("#toast");
+  el.textContent = msg; el.className = isError ? "err" : "";
+  el.style.display = "block";
+  clearTimeout(el._t); el._t = setTimeout(() => el.style.display = "none", 4000);
+}
+
+function toLogin() {
+  location.href = "/auth/login?returnTo=" + encodeURIComponent("/me");
+}
+
+// Cookie session only — no token paste. 401 → bounce to the login flow.
+async function api(path, opts={}) {
+  const res = await fetch("/api/me" + path, {
+    credentials: "include",
+    ...opts,
+    headers: { ...(opts.body ? {"Content-Type": "application/json"} : {}), ...(opts.headers||{}) },
+  });
+  if (res.status === 401) { toLogin(); throw new Error("Not signed in"); }
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+  return body;
+}
+
+const tierPill = t => `<span class="pill ${esc(t)}">${esc(t)}</span>`;
+
+// ── My access ──
+async function renderAccess() {
+  const el = $("#access");
+  let data;
+  try { data = await api("/access"); }
+  catch (e) { el.innerHTML = `<section class="panel"><p class="muted">${esc(e.message)}</p></section>`; return; }
+
+  $("#whoami").textContent = data.principal ? `${data.principal.label} · ${data.principal.role}` : "";
+
+  if (!data.servers.length) {
+    el.innerHTML = `<section class="panel"><h2>My access</h2>
+      <p class="muted">No MCP servers are available to your role yet. Ask an administrator to grant access.</p></section>`;
+    return;
+  }
+
+  el.innerHTML = `<section class="panel"><h2>My access</h2>
+    <p class="muted">Turn servers or individual tools off for your own sessions. You can only narrow what your role already grants — turning something on just removes your personal off-switch.</p>
+    ${data.servers.map(s => `
+      <div class="${s.enabled ? "" : "off"}" data-server="${esc(s.upstreamId)}">
+        <h3>
+          <label class="toggle"><input type="checkbox" data-u="${esc(s.upstreamId)}" data-t="" ${s.enabled ? "checked" : ""}><span class="slider"></span></label>
+          <span class="mono">${esc(s.upstreamId)}</span>
+          <span class="muted">(${s.tools.length} tool${s.tools.length === 1 ? "" : "s"})</span>
+        </h3>
+        <table class="tools">
+          ${s.tools.map(t => `<tr class="${(s.enabled && t.enabled) ? "" : "off"}">
+            <td style="width:48px"><label class="toggle"><input type="checkbox" data-u="${esc(s.upstreamId)}" data-t="${esc(t.name)}" ${t.enabled ? "checked" : ""} ${s.enabled ? "" : "disabled"}><span class="slider"></span></label></td>
+            <td class="mono">${esc(t.exposedName)}</td>
+            <td>${tierPill(t.tier)}</td>
+          </tr>`).join("")}
+        </table>
+      </div>`).join("")}
+  </section>`;
+
+  el.onchange = async (ev) => {
+    const i = ev.target;
+    if (i.dataset.u === undefined) return;
+    try {
+      await api("/prefs", { method: "PUT", body: JSON.stringify({
+        upstreamId: i.dataset.u, toolName: i.dataset.t, enabled: i.checked }) });
+      toast("Saved");
+      renderAccess();
+    } catch (e) { toast(e.message, true); renderAccess(); }
+  };
+}
+
+// ── My credentials ──
+async function renderCredentials() {
+  const el = $("#credentials");
+  let rows, servers;
+  try {
+    [rows, servers] = await Promise.all([api("/credentials"), api("/access").then(d => d.servers)]);
+  } catch (e) { el.innerHTML = ""; return; }
+
+  el.innerHTML = `<section class="panel"><h2>My credentials</h2>
+    <p class="muted">Personal credentials for per-user upstreams are written straight to the secret store — the gateway keeps only a reference, never the value.</p>
+    ${rows.length ? `<table>
+      <tr><th>Upstream</th><th>Field</th><th>Reference</th><th>Updated</th><th></th></tr>
+      ${rows.map(r => `<tr>
+        <td class="mono">${esc(r.upstreamId)}</td><td class="mono">${esc(r.field)}</td>
+        <td class="mono muted">${esc(r.secretRef)}</td>
+        <td class="muted">${esc((r.updatedAt || "").replace("T", " ").replace("Z", ""))}</td>
+        <td><button class="btn danger" data-del-u="${esc(r.upstreamId)}" data-del-f="${esc(r.field)}">Delete</button></td>
+      </tr>`).join("")}</table>` : '<p class="muted">No personal credentials registered.</p>'}
+    <h3>Register / rotate a credential</h3>
+    <div class="row">
+      <label>Upstream <select id="cred-upstream">
+        ${servers.map(s => `<option value="${esc(s.upstreamId)}">${esc(s.upstreamId)}</option>`).join("")}
+      </select></label>
+      <label>Field <input id="cred-field" placeholder="token" pattern="[A-Za-z0-9_-]+"></label>
+      <label style="flex:1">Value <input id="cred-value" type="password" style="width:100%"></label>
+      <button class="btn" id="cred-save">Save</button>
+    </div>
+    <p class="mono" id="cred-result"></p>
+  </section>`;
+
+  el.onclick = async (ev) => {
+    const b = ev.target.closest("[data-del-u]"); if (!b) return;
+    if (!confirm(`Delete credential ${b.dataset.delU} / ${b.dataset.delF}?`)) return;
+    try {
+      await api(`/credentials/${encodeURIComponent(b.dataset.delU)}/${encodeURIComponent(b.dataset.delF)}`, { method: "DELETE" });
+      toast("Deleted"); renderCredentials();
+    } catch (e) { toast(e.message, true); }
+  };
+  $("#cred-save").onclick = async () => {
+    const upstreamId = $("#cred-upstream").value;
+    const field = $("#cred-field").value.trim();
+    const value = $("#cred-value").value;
+    if (!upstreamId || !field || !value) { toast("Upstream, field and value are all required", true); return; }
+    try {
+      const r = await api(`/credentials/${encodeURIComponent(upstreamId)}`, {
+        method: "PUT", body: JSON.stringify({ field, value }) });
+      $("#cred-value").value = "";
+      $("#cred-result").textContent = "Saved → " + r.ref; // only the ref, never the value
+      renderCredentials();
+    } catch (e) { toast(e.message, true); }
+  };
+}
+
+// ── Connect ──
+function renderConnect() {
+  const url = location.origin + "/mcp";
+  const snippet = `claude mcp add --transport http mspstack ${url}`;
+  $("#connect").innerHTML = `<section class="panel"><h2>Connect</h2>
+    <p>Point your MCP client at this gateway endpoint:</p>
+    <div class="row">
+      <input id="mcp-url" class="mono" style="flex:1" readonly value="${esc(url)}">
+      <button class="btn secondary" data-copy="${esc(url)}">Copy URL</button>
+    </div>
+    <p class="muted">Add it to Claude Code / Claude Desktop:</p>
+    <pre id="mcp-snippet">${esc(snippet)}</pre>
+    <div class="row" style="margin-top:10px">
+      <button class="btn secondary" data-copy="${esc(snippet)}">Copy command</button>
+    </div>
+  </section>`;
+  $("#connect").onclick = async (ev) => {
+    const b = ev.target.closest("[data-copy]"); if (!b) return;
+    try { await navigator.clipboard.writeText(b.dataset.copy); toast("Copied"); }
+    catch { toast("Copy failed — select the text manually", true); }
+  };
+}
+
+$("#logout").onclick = () => {
+  fetch("/auth/logout", { method: "POST", credentials: "include" })
+    .catch(() => {})
+    .finally(() => toLogin());
+};
+
+renderAccess();
+renderCredentials();
+renderConnect();
+</script>
+</body>
+</html>
