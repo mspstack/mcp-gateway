@@ -48,7 +48,8 @@ metadata + RFC 7591 DCR + `/oauth/authorize|token` (authorization_code AND
 rotating refresh_token grants), brokering user auth to Entra, so
 `claude mcp add <url>` connects with zero pre-provisioned client config;
 admin client management on the Users tab. Remaining: CIMD `https://`
-client ids (phase 3).
+client ids (phase 3) — tracked in issue #5, deliberately deferred until
+clients start sending URL-shaped client ids.
 
 Also: resources/prompts federation · npm pre-install pool.
 
