@@ -42,6 +42,12 @@ Self-hosted MCP manager/gateway: one streamable-HTTP `/mcp` endpoint federating 
 
 ## Roadmap (post-v1)
 
-Admin UI OIDC login (cookie + PKCE via openid-client; today the UI signs in with an admin bearer token) · resources/prompts federation · per-principal upstream sessions (`sessionMode`) · CIMD client registration · npm pre-install pool.
+**NEXT UP — OAuth Authorization Server facade (DCR):** standard MCP clients
+(`claude mcp add <url>`) currently FAIL to connect in OAuth mode — Entra has no
+dynamic client registration and the gateway hosts no authorization server of its
+own (verified against prod 2026-07-16). Full self-contained plan:
+`docs/plans/oauth-authorization-server.md`. CIMD follows after DCR ships.
+
+Also: resources/prompts federation · npm pre-install pool.
 
 **MSPStack integrated mode** — the gateway runs as a native MSPStack app. SHIPPED: `secrets/keyvault.ts` (`kv:<name>` refs), `GATEWAY_MODE=standalone|integrated` (integrated demands KEY_VAULT_URI + OIDC; standalone is byte-for-byte the old behavior), `/api/me/*` self-service (narrow-only prefs enforced in PolicyService at list AND call; personal creds → secret store, refs only), and `sessionMode:"per-user"` upstream sessions consuming those creds. REMAINING: the Toolbox "My MCP Access" app (MSPStack repo; gated on an Entra app registration for the gateway audience). Design plan: hub repo (private, github.com/mspstack/hub) `docs/plans/gateway-integrated-mode.md`.
