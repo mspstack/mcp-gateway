@@ -1,4 +1,4 @@
-# mspstack-gateway
+# mcp-gateway
 
 Self-hosted MCP manager/gateway: one streamable-HTTP `/mcp` endpoint federating many upstream MCP servers, with OAuth/token auth, DB-backed roles, per-tool toggles, OpenBao secret injection, and an admin UI. TypeScript, ESM, **Node ≥24** (uses built-in `node:sqlite`), npm workspaces. Founding piece of the MSPStack umbrella; siblings: mcp-itglue, mcp-connectwise-psa, mcp-planner (same author, same conventions).
 
@@ -44,4 +44,4 @@ Self-hosted MCP manager/gateway: one streamable-HTTP `/mcp` endpoint federating 
 
 Admin UI OIDC login (cookie + PKCE via openid-client; today the UI signs in with an admin bearer token) · resources/prompts federation · per-principal upstream sessions (`sessionMode`) · CIMD client registration · npm pre-install pool.
 
-**MSPStack integrated mode** — the gateway runs as a native MSPStack app. SHIPPED: `secrets/keyvault.ts` (`kv:<name>` refs), `GATEWAY_MODE=standalone|integrated` (integrated demands KEY_VAULT_URI + OIDC; standalone is byte-for-byte the old behavior), `/api/me/*` self-service (narrow-only prefs enforced in PolicyService at list AND call; personal creds → secret store, refs only), and `sessionMode:"per-user"` upstream sessions consuming those creds. REMAINING: the Toolbox "My MCP Access" app (MSPStack repo; gated on an Entra app registration for the gateway audience). Design plan: MSPStack repo (private, github.com/selic/MSPStack) `docs/plans/gateway-integrated-mode.md`.
+**MSPStack integrated mode** — the gateway runs as a native MSPStack app. SHIPPED: `secrets/keyvault.ts` (`kv:<name>` refs), `GATEWAY_MODE=standalone|integrated` (integrated demands KEY_VAULT_URI + OIDC; standalone is byte-for-byte the old behavior), `/api/me/*` self-service (narrow-only prefs enforced in PolicyService at list AND call; personal creds → secret store, refs only), and `sessionMode:"per-user"` upstream sessions consuming those creds. REMAINING: the Toolbox "My MCP Access" app (MSPStack repo; gated on an Entra app registration for the gateway audience). Design plan: hub repo (private, github.com/mspstack/hub) `docs/plans/gateway-integrated-mode.md`.
