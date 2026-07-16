@@ -35,6 +35,7 @@ import {
   resolveInjectionValue,
   type SecretStore,
 } from "../secrets/store.js";
+import { SERVER_NAME, SERVER_VERSION } from "../version.js";
 
 const BACKOFF_INITIAL_MS = 1_000;
 const BACKOFF_MAX_MS = 60_000;
@@ -90,7 +91,7 @@ export class UpstreamConnection {
   private async doConnect(): Promise<void> {
     const context = `upstream "${this.spec.id}"`;
     try {
-      const client = new Client({ name: "mspstack-gateway", version: "0.1.0" });
+      const client = new Client({ name: SERVER_NAME, version: SERVER_VERSION });
 
       let transport;
       if (this.spec.transport === "http") {
