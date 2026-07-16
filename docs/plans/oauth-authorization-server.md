@@ -5,8 +5,10 @@
 > was verified end-to-end against prod (stock `claude mcp add <url>` connects,
 > incl. mobile). Phase 2 (rotating refresh tokens with family revocation on
 > reuse + admin client management API/UI) followed in v0.5.0. Phase 3 (CIMD)
-> remains. This document is self-contained: a fresh session in this repo can
-> execute the remaining phase without prior conversation context.
+> remains — tracked in issue #5 with full scope; pick it up when authorize
+> logs show URL-shaped client_id values. This document is self-contained: a
+> fresh session in this repo can execute the remaining phase without prior
+> conversation context.
 
 ## 1. Problem — verified in production 2026-07-16
 
