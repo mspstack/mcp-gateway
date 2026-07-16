@@ -2,7 +2,7 @@
 /**
  * MSPStack Gateway — CLI entry.
  *
- *   mspstack-gateway [--port 3100] [--config mspstack.config.json] [--db data/gateway.db]
+ *   mcp-gateway [--port 3100] [--config mspstack.config.json] [--db data/gateway.db]
  *
  * All log output goes to stderr (family convention). Refuses to start with
  * no authentication configured unless DEV_ALLOW_UNAUTHENTICATED=true.

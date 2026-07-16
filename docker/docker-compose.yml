@@ -44,7 +44,7 @@ services:
   # gateway (admin UI → MCP servers) with e.g. url http://mcp-itglue:3000/mcp
   #
   # mcp-itglue:
-  #   image: ghcr.io/selic/mcp-itglue:latest
+  #   image: ghcr.io/mspstack/mcp-itglue:latest
   #   environment:
   #     TRANSPORT: http
   #     ITGLUE_API_KEY: ${ITGLUE_API_KEY}

@@ -42,8 +42,8 @@ jobs:
             exit 0
           fi
           VERSION=$(node -p "require('./packages/gateway/package.json').version")
-          if npm view "mspstack-gateway@$VERSION" version >/dev/null 2>&1; then
-            echo "mspstack-gateway@$VERSION is already published; skipping"
+          if npm view "@mspstack/mcp-gateway@$VERSION" version >/dev/null 2>&1; then
+            echo "@mspstack/mcp-gateway@$VERSION is already published; skipping"
             exit 0
           fi
           npm publish --workspace packages/gateway --provenance --access public
@@ -55,5 +55,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" mspstack-gateway-*.tgz \
+          gh release create "$GITHUB_REF_NAME" mspstack-mcp-gateway-*.tgz \
             --title "$GITHUB_REF_NAME" --generate-notes

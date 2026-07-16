@@ -1,11 +1,14 @@
 {
-  "name": "mspstack-gateway",
+  "name": "@mspstack/mcp-gateway",
   "version": "0.2.0",
   "description": "Self-hosted MCP gateway: one streamable-HTTP endpoint federating many MCP servers with namespaced tools, per-tool toggles, roles, and secure upstream credential injection",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "mspstack-gateway": "dist/index.js"
+    "mcp-gateway": "dist/index.js"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "files": [
     "dist",
@@ -40,12 +43,12 @@
   "author": "Eugene Samotija (selic) <es@defency.net> (https://defency.net)",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/selic/mspstack-gateway.git",
+    "url": "git+https://github.com/mspstack/mcp-gateway.git",
     "directory": "packages/gateway"
   },
-  "homepage": "https://github.com/selic/mspstack-gateway#readme",
+  "homepage": "https://github.com/mspstack/mcp-gateway#readme",
   "bugs": {
-    "url": "https://github.com/selic/mspstack-gateway/issues"
+    "url": "https://github.com/mspstack/mcp-gateway/issues"
   },
   "dependencies": {
     "@azure/identity": "^4.13.1",

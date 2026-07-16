@@ -76,7 +76,7 @@ Upstreams are managed in the admin UI (stored in SQLite) and/or declared in `msp
 
 Requires **Node ≥ 24** (built-in `node:sqlite` — no native dependencies).
 
-Part of **MSPStack** — a family of MCP tooling for MSPs: [mcp-itglue](https://github.com/selic/mcp-itglue), [mcp-connectwise-psa](https://github.com/selic/mcp-connectwise-psa), [mcp-planner](https://github.com/selic/mcp-planner).
+Part of **MSPStack** — a family of MCP tooling for MSPs: [mcp-itglue](https://github.com/mspstack/mcp-itglue), [mcp-connectwise-psa](https://github.com/mspstack/mcp-connectwise-psa), [mcp-planner](https://github.com/mspstack/mcp-planner).
 
 ## Roadmap
 
