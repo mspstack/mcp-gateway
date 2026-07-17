@@ -48,6 +48,9 @@ import {
 } from "../auth/login.js";
 import { PRM_PATH, prmDocument, wwwAuthenticate } from "../auth/prm.js";
 import type { DirectorySearch } from "../auth/directory.js";
+import type { UserConnectService } from "../auth/user-connect.js";
+import { signCookiePayload, verifyCookiePayload } from "../auth/login.js";
+import { principalSlug } from "../auth/principal.js";
 import {
   ACCESS_TOKEN_TTL_S,
   authorizationServerMetadata,
@@ -76,6 +79,8 @@ export interface AppDeps {
   loginService?: LoginService | null;
   /** Entra directory search for the admin UI, or null when unavailable. */
   directorySearch?: DirectorySearch | null;
+  /** One-click delegated Connect flow for /me, or null when unavailable. */
+  userConnect?: UserConnectService | null;
   /** Directory with the static admin UI, or null to skip mounting. */
   adminUiDir?: string | null;
   /** Override for the anonymous /oauth/register rate limit (tests only). */
@@ -750,6 +755,130 @@ export function createApp(deps: AppDeps): express.Express {
         console.error(`[oauth] /oauth/token failed: ${String(err)}`);
         if (!res.headersSent) res.status(500).json({ error: "server_error" });
       });
+    });
+
+    // ── One-click delegated Connect (/me → Entra PKCE → personal credential) ──
+    // The signed-in user clicks "Connect <label>" on /me; the gateway runs an
+    // authorization-code + PKCE flow against the upstream's PUBLIC client and
+    // stores the refresh token as their personal credential. The value goes
+    // straight to the secret store — never SQLite, never the logs, never the
+    // browser.
+    const CONNECT_COOKIE = "mspstack_connect";
+    const connectService = deps.userConnect ?? null;
+    const connectRedirectUri = `${config.publicUrl}/me/connect/callback`;
+    const meWithError = (res: Response, code: string): void => {
+      res.redirect(302, `/me?connectError=${encodeURIComponent(code)}`);
+    };
+    /**
+     * The /me session identity as a Principal for the credential-storage keys.
+     * Role fields are irrelevant here — principalSlug/prefs keys use only
+     * kind + subject (a role change must not orphan personal credentials).
+     */
+    const sessionPrincipal = (req: Request): Principal | null => {
+      const claims = readSessionClaims(parseCookies(req.headers.cookie)[SESSION_COOKIE], login.sessionSecret);
+      if (!claims) return null;
+      return {
+        kind: "oidc",
+        subject: `${claims.iss}|${claims.sub}`,
+        label: claims.sub,
+        roleId: 0,
+        roleName: "",
+        isAdmin: false,
+      };
+    };
+
+    // NOTE: registered before the parametric route below — otherwise
+    // "/me/connect/callback" would match :upstreamId.
+    app.get("/me/connect/callback", (req: Request, res: Response) => {
+      void (async () => {
+        if (!connectService || !deps.secretStore) return meWithError(res, "unavailable");
+        const principal = sessionPrincipal(req);
+        if (!principal) return meWithError(res, "session_expired");
+        const cookies = parseCookies(req.headers.cookie);
+        res.clearCookie(CONNECT_COOKIE, { path: "/" });
+        const transient = verifyCookiePayload(cookies[CONNECT_COOKIE], login.sessionSecret, TRANSIENT_MAX_AGE_MS);
+        const code = queryParam(req.query.code);
+        const state = queryParam(req.query.state);
+        if (
+          !transient ||
+          typeof transient.upstreamId !== "string" ||
+          typeof transient.codeVerifier !== "string" ||
+          transient.state !== state ||
+          !code
+        ) {
+          return meWithError(res, "state_mismatch");
+        }
+        const upstreamId = transient.upstreamId;
+        const connect = deps.repo.getUpstream(upstreamId)?.spec.userConnect;
+        if (!connect) return meWithError(res, "not_offered");
+
+        let refreshToken: string;
+        try {
+          ({ refreshToken } = await connectService.exchangeCode({
+            clientId: connect.clientId,
+            code,
+            redirectUri: connectRedirectUri,
+            codeVerifier: transient.codeVerifier,
+          }));
+        } catch (err) {
+          console.error(`[connect] exchange failed for ${upstreamId}: ${err instanceof Error ? err.message : String(err)}`);
+          return meWithError(res, "exchange_failed");
+        }
+
+        // Same storage path as PUT /api/me/credentials — store the token (and
+        // optionally the client id) under the caller's principal.
+        const path = `gw-user-${principalSlug(principal)}-${upstreamId}`;
+        await deps.secretStore.put(path, connect.tokenField, refreshToken);
+        deps.repo.upsertUserCredential(
+          prefsIdentity(principal),
+          upstreamId,
+          connect.tokenField,
+          deps.secretStore.refFor(path, connect.tokenField)
+        );
+        if (connect.clientIdField) {
+          await deps.secretStore.put(path, connect.clientIdField, connect.clientId);
+          deps.repo.upsertUserCredential(
+            prefsIdentity(principal),
+            upstreamId,
+            connect.clientIdField,
+            deps.secretStore.refFor(path, connect.clientIdField)
+          );
+        }
+        console.error(`[connect] ${connect.label} connected for principal ${principal.subject.slice(0, 24)}… (${upstreamId})`);
+        res.redirect(302, `/me?connected=${encodeURIComponent(upstreamId)}`);
+      })().catch((err) => {
+        console.error(`[connect] callback failed: ${String(err)}`);
+        if (!res.headersSent) meWithError(res, "internal");
+      });
+    });
+
+    app.get("/me/connect/:upstreamId", (req: Request, res: Response) => {
+      if (!connectService || !deps.secretStore) {
+        res.status(404).send("Connect is not available on this gateway (needs Entra login + a secret store).");
+        return;
+      }
+      if (!sessionPrincipal(req)) {
+        const target = `/me/connect/${encodeURIComponent(String(req.params.upstreamId))}`;
+        res.redirect(302, `/auth/login?returnTo=${encodeURIComponent(target)}`);
+        return;
+      }
+      const upstreamId = String(req.params.upstreamId ?? "");
+      const connect = deps.repo.getUpstream(upstreamId)?.spec.userConnect;
+      if (!connect) {
+        res.status(404).send(`Upstream "${upstreamId}" does not offer Connect.`);
+        return;
+      }
+      const { redirectUrl, codeVerifier, state } = connectService.start({
+        clientId: connect.clientId,
+        scopes: connect.scopes,
+        redirectUri: connectRedirectUri,
+      });
+      res.cookie(
+        CONNECT_COOKIE,
+        signCookiePayload({ upstreamId, codeVerifier, state }, login.sessionSecret),
+        transientCookieOpts
+      );
+      res.redirect(302, redirectUrl);
     });
 
     // Light browser-navigation gate for the user-facing pages. Only redirects
