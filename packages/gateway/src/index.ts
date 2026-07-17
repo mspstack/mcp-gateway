@@ -16,6 +16,7 @@ import { Repo } from "./db/repo.js";
 import { PolicyService } from "./domain/policy.js";
 import { createOidcVerifier } from "./auth/oidc.js";
 import { createLoginService } from "./auth/login.js";
+import { createDirectorySearch } from "./auth/directory.js";
 import { OpenBaoStore } from "./secrets/openbao.js";
 import { createKeyVaultStore } from "./secrets/keyvault.js";
 import { UpstreamConnection } from "./upstream/connection.js";
@@ -91,6 +92,13 @@ async function main(): Promise<void> {
     );
   }
 
+  // ── Entra directory search (admin UI pickers) ──
+  const directorySearch =
+    config.login && config.oidc ? createDirectorySearch(config.oidc, config.login) : null;
+  if (config.login && !directorySearch) {
+    console.error("[directory] issuer is not an Entra tenant — admin directory search disabled");
+  }
+
   // ── upstreams ──
   const specs = repo.listUpstreams().map((row) => row.spec);
   const manager = new UpstreamManager(specs, (spec) => new UpstreamConnection(spec, secretStore));
@@ -106,6 +114,7 @@ async function main(): Promise<void> {
     secretStore,
     oidcVerifier,
     loginService,
+    directorySearch,
     adminUiDir: existsSync(adminUiDir) ? adminUiDir : null,
   });
   const httpServer = app.listen(config.port, () => {
