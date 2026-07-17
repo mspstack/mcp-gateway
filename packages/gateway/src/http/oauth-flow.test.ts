@@ -15,8 +15,10 @@ import { Repo } from "../db/repo.js";
 import { PolicyService } from "../domain/policy.js";
 import { UpstreamManager } from "../upstream/manager.js";
 import type { GatewayConfig } from "../config.js";
-import type { LoginService } from "../auth/login.js";
+import { mintSessionCookieValue, type LoginService } from "../auth/login.js";
 import { mintAccessToken, verifyAccessToken } from "../auth/authz-server.js";
+import { MemorySecretStore } from "../secrets/memory.js";
+import type { UserConnectService } from "../auth/user-connect.js";
 import { createApp } from "./app.js";
 
 const PUBLIC_URL = "http://gw.test";
@@ -393,6 +395,94 @@ describe("gateway-token auth on /mcp + PRM discovery", () => {
     expect((await postMcp(forged)).status).toBe(401);
 
     expect((await postMcp()).status).toBe(401);
+  });
+
+  it("one-click Connect: session → Entra PKCE → refresh token stored as a personal credential", async () => {
+    const secretStore = new MemorySecretStore();
+    const connectRepo = new Repo(openDatabase(":memory:"));
+    connectRepo.upsertUpstream(
+      {
+        id: "planner",
+        namespace: "planner",
+        transport: "http",
+        url: "http://unused/mcp",
+        headers: {},
+        enabled: true,
+        sessionMode: "per-user",
+        requirePersonalCredentials: true,
+        userConnect: {
+          kind: "entra-refresh-token",
+          clientId: "pub-client",
+          scopes: "Tasks.ReadWrite",
+          tokenField: "x-ms-refresh-token",
+          clientIdField: "x-ms-client-id",
+          label: "Microsoft Planner",
+        },
+      } as never,
+      "api"
+    );
+    const fakeConnect: UserConnectService = {
+      start: () => ({ redirectUrl: "https://entra.example/authorize?connect=1", codeVerifier: "cv", state: "st" }),
+      async exchangeCode({ code, codeVerifier }) {
+        if (code !== "good-code" || codeVerifier !== "cv") throw new Error("bad exchange");
+        return { refreshToken: "rt-secret-value" };
+      },
+    };
+    const manager = new UpstreamManager([], () => {
+      throw new Error("unused");
+    });
+    await manager.start();
+    const app = createApp({
+      config,
+      repo: connectRepo,
+      manager,
+      policy: new PolicyService(connectRepo),
+      secretStore,
+      oidcVerifier: null,
+      loginService: fakeLogin,
+      userConnect: fakeConnect,
+      adminUiDir: null,
+    });
+    const server = app.listen(0);
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const origin = `http://localhost:${port}`;
+      const session = `mspstack_session=${mintSessionCookieValue({ iss: ENTRA_ISS, sub: ENTRA_SUB }, config.login!.sessionSecret)}`;
+
+      // no session → bounced to login
+      const anon = await fetch(`${origin}/me/connect/planner`, { redirect: "manual" });
+      expect(anon.status).toBe(302);
+      expect(anon.headers.get("location")).toContain("/auth/login");
+
+      // with session → 302 to Entra + signed connect cookie
+      const start = await fetch(`${origin}/me/connect/planner`, { redirect: "manual", headers: { Cookie: session } });
+      expect(start.status).toBe(302);
+      expect(start.headers.get("location")).toBe("https://entra.example/authorize?connect=1");
+      const connectCookie = /mspstack_connect=([^;]+)/.exec(start.headers.get("set-cookie") ?? "")![1]!;
+
+      // state mismatch → error redirect, nothing stored
+      const bad = await fetch(`${origin}/me/connect/callback?code=good-code&state=wrong`, {
+        redirect: "manual",
+        headers: { Cookie: `${session}; mspstack_connect=${connectCookie}` },
+      });
+      expect(bad.headers.get("location")).toContain("connectError=state_mismatch");
+      expect(connectRepo.listUserCredentials(`oidc:${ENTRA_ISS}|${ENTRA_SUB}`)).toHaveLength(0);
+
+      // happy path → credential rows + secret stored, value never in SQLite
+      const done = await fetch(`${origin}/me/connect/callback?code=good-code&state=st`, {
+        redirect: "manual",
+        headers: { Cookie: `${session}; mspstack_connect=${connectCookie}` },
+      });
+      expect(done.headers.get("location")).toBe("/me?connected=planner");
+      const creds = connectRepo.listUserCredentials(`oidc:${ENTRA_ISS}|${ENTRA_SUB}`);
+      expect(creds.map((c) => c.field).sort()).toEqual(["x-ms-client-id", "x-ms-refresh-token"]);
+      expect(creds.every((c) => c.secretRef.startsWith("bao:gw-user-"))).toBe(true);
+      const tokenRef = creds.find((c) => c.field === "x-ms-refresh-token")!;
+      const [path, field] = tokenRef.secretRef.replace("bao:", "").split("#");
+      expect(await secretStore.get({ scheme: "bao", path: path!, field: field! })).toBe("rt-secret-value");
+    } finally {
+      server.close();
+    }
   });
 
   it("without interactive login the PRM keeps pointing at the raw IdP (regression)", async () => {

@@ -62,6 +62,26 @@ const upstreamBase = {
   sessionMode: z.enum(["shared", "per-user"]).default("shared"),
   /** per-user only: refuse shared-credential fallback for callers without personal creds. */
   requirePersonalCredentials: z.boolean().default(false),
+  /**
+   * One-click "Connect" on /me: the gateway runs an Entra authorization-code
+   * + PKCE flow against a PUBLIC client and stores the resulting refresh
+   * token as the user's personal credential — no scripts, no copy-paste.
+   */
+  userConnect: z
+    .object({
+      kind: z.literal("entra-refresh-token"),
+      /** The public client (allowPublicClientFlows) with the delegated scopes. */
+      clientId: z.string().min(1),
+      /** Space-separated delegated scopes; offline_access is added if missing. */
+      scopes: z.string().min(1),
+      /** Credential field (header name) the refresh token is stored under. */
+      tokenField: z.string().min(1).regex(/^[A-Za-z0-9_-]+$/),
+      /** Optional second field to store the client id under (BYOK headers). */
+      clientIdField: z.string().regex(/^[A-Za-z0-9_-]+$/).optional(),
+      /** Button label, e.g. "Microsoft Planner". */
+      label: z.string().min(1),
+    })
+    .optional(),
 };
 
 const httpUpstreamSchema = z.object({
