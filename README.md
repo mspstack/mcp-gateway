@@ -12,7 +12,7 @@ Point Claude (Code, Desktop, or any MCP client) at a single URL; the gateway con
 - **Roles & policy** — viewer/editor/admin (plus custom roles) gate tools by annotation-derived tiers (read/write/destructive), with per-upstream grants and per-tool allow/deny overrides; enforcement is re-checked at call time
 - **Secrets stay server-side** — upstream API keys live in OpenBao (`bao:path#field` refs) or env vars, injected at connect time; the inbound client token is never passed through to upstreams
 - **Install from the UI** — add MCP servers by URL, npm package (npx), or Docker image; search the official MCP registry; preflight-test before saving; crashed stdio servers restart with backoff
-- **Admin UI** at `/admin` — status, server management, tool toggles, role matrix, users & group mappings, secret writes
+- **Admin UI** at `/admin` — status, server management, tool toggles, role matrix, users & group mappings (with live Entra group search when the login app holds the directory-read Graph roles), OAuth client management, secret writes
 
 ## Quick start
 

@@ -47,6 +47,7 @@ import {
   type LoginService,
 } from "../auth/login.js";
 import { PRM_PATH, prmDocument, wwwAuthenticate } from "../auth/prm.js";
+import type { DirectorySearch } from "../auth/directory.js";
 import {
   ACCESS_TOKEN_TTL_S,
   authorizationServerMetadata,
@@ -73,6 +74,8 @@ export interface AppDeps {
   oidcVerifier: OidcVerifier | null;
   /** Interactive-login flow (openid-client), or null when login is unconfigured. */
   loginService?: LoginService | null;
+  /** Entra directory search for the admin UI, or null when unavailable. */
+  directorySearch?: DirectorySearch | null;
   /** Directory with the static admin UI, or null to skip mounting. */
   adminUiDir?: string | null;
   /** Override for the anonymous /oauth/register rate limit (tests only). */
