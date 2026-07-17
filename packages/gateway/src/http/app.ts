@@ -49,6 +49,7 @@ import {
 import { PRM_PATH, prmDocument, wwwAuthenticate } from "../auth/prm.js";
 import type { DirectorySearch } from "../auth/directory.js";
 import type { UserConnectService } from "../auth/user-connect.js";
+import type { Preset } from "../domain/presets.js";
 import { signCookiePayload, verifyCookiePayload } from "../auth/login.js";
 import { principalSlug } from "../auth/principal.js";
 import {
@@ -81,6 +82,8 @@ export interface AppDeps {
   directorySearch?: DirectorySearch | null;
   /** One-click delegated Connect flow for /me, or null when unavailable. */
   userConnect?: UserConnectService | null;
+  /** Installable upstream presets (builtins + mspstack.presets.json). */
+  presets?: Preset[];
   /** Directory with the static admin UI, or null to skip mounting. */
   adminUiDir?: string | null;
   /** Override for the anonymous /oauth/register rate limit (tests only). */

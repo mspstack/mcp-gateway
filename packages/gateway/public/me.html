@@ -167,15 +167,29 @@ async function renderCredentials() {
   } catch (e) { el.innerHTML = ""; return; }
 
   const offers = servers.filter(s => s.connect);
+  const guided = servers.filter(s => (s.credentialFields || []).length);
+  const hasField = (up, f) => rows.some(r => r.upstreamId === up && r.field === f);
   el.innerHTML = `<section class="panel"><h2>My credentials</h2>
     <p class="muted">Personal credentials for per-user upstreams are written straight to the secret store — the gateway keeps only a reference, never the value.</p>
     ${offers.map(s => {
-      const connected = rows.some(r => r.upstreamId === s.upstreamId && r.field === s.connect.tokenField);
+      const connected = hasField(s.upstreamId, s.connect.tokenField);
       return `<div class="row" style="align-items:center; gap:10px; margin-bottom:8px">
         <a class="btn" href="/me/connect/${encodeURIComponent(s.upstreamId)}">${connected ? "Reconnect" : "Connect"} ${esc(s.connect.label)} →</a>
         <span class="muted">${connected ? "connected — one click to refresh the sign-in" : "one click: sign in with Microsoft, the credential is stored for you"}</span>
       </div>`;
     }).join("")}
+    ${guided.map(s => `
+      <h3>Set up ${esc(s.upstreamId)}</h3>
+      <div class="row" style="flex-wrap:wrap" data-setup="${esc(s.upstreamId)}">
+        ${s.credentialFields.map(f => `
+          <label style="min-width:260px; flex:1">${esc(f.label)}
+            ${hasField(s.upstreamId, f.field) ? '<span style="color:var(--ok,#3fb950)">✓ set</span>' : (f.optional ? '<span class="muted">(optional)</span>' : "")}
+            <input data-cred-field="${esc(f.field)}" type="${f.secret ? "password" : "text"}" style="width:100%"
+              placeholder="${hasField(s.upstreamId, f.field) ? "•••• leave empty to keep current" : ""}">
+            ${f.help ? `<div class="muted" style="font-size:12px">${esc(f.help)}</div>` : ""}
+          </label>`).join("")}
+        <button class="btn" data-setup-save="${esc(s.upstreamId)}">Save</button>
+      </div>`).join("")}
     ${rows.length ? `<table>
       <tr><th>Upstream</th><th>Field</th><th>Reference</th><th>Updated</th><th></th></tr>
       ${rows.map(r => `<tr>
@@ -184,19 +198,47 @@ async function renderCredentials() {
         <td class="muted">${esc((r.updatedAt || "").replace("T", " ").replace("Z", ""))}</td>
         <td><button class="btn danger" data-del-u="${esc(r.upstreamId)}" data-del-f="${esc(r.field)}">Delete</button></td>
       </tr>`).join("")}</table>` : '<p class="muted">No personal credentials registered.</p>'}
-    <h3>Register / rotate a credential</h3>
-    <div class="row">
-      <label>Upstream <select id="cred-upstream">
-        ${servers.map(s => `<option value="${esc(s.upstreamId)}">${esc(s.upstreamId)}</option>`).join("")}
-      </select></label>
-      <label>Field <input id="cred-field" placeholder="token" pattern="[A-Za-z0-9_-]+"></label>
-      <label style="flex:1">Value <input id="cred-value" type="password" style="width:100%"></label>
-      <button class="btn" id="cred-save">Save</button>
+    <p style="margin-top:10px"><a href="#" id="cred-advanced" class="muted">advanced: register a raw field…</a></p>
+    <div id="cred-raw" class="hidden">
+      <h3>Register / rotate a credential</h3>
+      <div class="row">
+        <label>Upstream <select id="cred-upstream">
+          ${servers.map(s => `<option value="${esc(s.upstreamId)}">${esc(s.upstreamId)}</option>`).join("")}
+        </select></label>
+        <label>Field <input id="cred-field" placeholder="token" pattern="[A-Za-z0-9_-]+"></label>
+        <label style="flex:1">Value <input id="cred-value" type="password" style="width:100%"></label>
+        <button class="btn" id="cred-save">Save</button>
+      </div>
+      <p class="mono" id="cred-result"></p>
     </div>
-    <p class="mono" id="cred-result"></p>
   </section>`;
 
+  $("#cred-advanced").onclick = (ev) => {
+    ev.preventDefault();
+    $("#cred-raw").classList.remove("hidden");
+    $("#cred-advanced").style.display = "none";
+  };
+
   el.onclick = async (ev) => {
+    // Guided setup save: one PUT per FILLED field (empty = keep current value).
+    const save = ev.target.closest("[data-setup-save]");
+    if (save) {
+      const upstreamId = save.dataset.setupSave;
+      const inputs = [...el.querySelectorAll(`[data-setup="${CSS.escape(upstreamId)}"] [data-cred-field]`)];
+      const filled = inputs.filter(i => i.value.trim());
+      if (!filled.length) { toast("Nothing to save — fill at least one field", true); return; }
+      try {
+        for (const i of filled) {
+          await api(`/credentials/${encodeURIComponent(upstreamId)}`, {
+            method: "PUT",
+            body: JSON.stringify({ field: i.dataset.credField, value: i.value.trim() }),
+          });
+        }
+        toast(`Saved ${filled.length} credential${filled.length > 1 ? "s" : ""} for ${upstreamId}`);
+        renderCredentials();
+      } catch (e) { toast(e.message, true); }
+      return;
+    }
     const b = ev.target.closest("[data-del-u]"); if (!b) return;
     if (!confirm(`Delete credential ${b.dataset.delU} / ${b.dataset.delF}?`)) return;
     try {
@@ -222,24 +264,42 @@ async function renderCredentials() {
 // ── Connect ──
 function renderConnect() {
   const url = location.origin + "/mcp";
-  const snippet = `claude mcp add --transport http mspstack ${url}`;
+  const cliCommand = (userScope) =>
+    `claude mcp add${userScope ? " --scope user" : ""} --transport http mspstack ${url}`;
+  const jsonSnippet = JSON.stringify(
+    { mcpServers: { mspstack: { type: "http", url } } }, null, 2);
   $("#connect").innerHTML = `<section class="panel"><h2>Connect</h2>
     <p>Point your MCP client at this gateway endpoint:</p>
     <div class="row">
       <input id="mcp-url" class="mono" style="flex:1" readonly value="${esc(url)}">
       <button class="btn secondary" data-copy="${esc(url)}">Copy URL</button>
     </div>
-    <p class="muted">Add it to Claude Code / Claude Desktop:</p>
-    <pre id="mcp-snippet">${esc(snippet)}</pre>
-    <div class="row" style="margin-top:10px">
-      <button class="btn secondary" data-copy="${esc(snippet)}">Copy command</button>
+    <p class="muted" style="margin-top:12px">Claude Code (CLI):</p>
+    <pre id="mcp-snippet">${esc(cliCommand(true))}</pre>
+    <div class="row" style="margin-top:6px; align-items:center">
+      <label style="display:flex; align-items:center; gap:6px; flex-direction:row">
+        <input type="checkbox" id="cli-user-scope" checked style="width:auto">
+        Install for my user (all projects)</label>
+      <button class="btn secondary" id="copy-cli">Copy command</button>
+    </div>
+    <p class="muted" style="margin-top:12px">Claude Desktop / Cursor / VS Code (JSON config):</p>
+    <pre>${esc(jsonSnippet)}</pre>
+    <div class="row" style="margin-top:6px">
+      <button class="btn secondary" data-copy="${esc(jsonSnippet)}">Copy JSON</button>
     </div>
   </section>`;
-  $("#connect").onclick = async (ev) => {
-    const b = ev.target.closest("[data-copy]"); if (!b) return;
-    try { await navigator.clipboard.writeText(b.dataset.copy); toast("Copied"); }
+  const copy = async (text) => {
+    try { await navigator.clipboard.writeText(text); toast("Copied"); }
     catch { toast("Copy failed — select the text manually", true); }
   };
+  $("#cli-user-scope").onchange = () => {
+    $("#mcp-snippet").textContent = cliCommand($("#cli-user-scope").checked);
+  };
+  $("#copy-cli").onclick = () => copy(cliCommand($("#cli-user-scope").checked));
+  $("#connect").addEventListener("click", (ev) => {
+    const b = ev.target.closest("[data-copy]"); if (!b) return;
+    copy(b.dataset.copy);
+  });
 }
 
 $("#logout").onclick = () => {

@@ -212,6 +212,12 @@ async function renderUpstreams() {
           </td></tr>`).join("")}
       </table>
     </section>
+    <section class="panel"><h2>Install a preset</h2>
+      <p class="muted">Ready-made configurations for known MCP servers — fills BYOK headers, per-user
+        session mode, Connect wiring, and applies the recommended role grants.</p>
+      <div id="preset-cards" class="row" style="flex-wrap:wrap; gap:8px"></div>
+      <div id="preset-form" class="hidden" style="margin-top:12px"></div>
+    </section>
     <section class="panel"><h2>Add MCP server</h2>
       <div class="row">
         <label>Type <select id="add-type">
@@ -273,6 +279,58 @@ async function renderUpstreams() {
     args.push(img);
     return { id, namespace, transport: "stdio", command: "docker", args, env: inject };
   };
+
+  // ── presets ──
+  api("/presets").then((presets) => {
+    $("#preset-cards").innerHTML = presets.length ? presets.map(p => `
+      <button class="btn secondary" data-preset="${esc(p.id)}" title="${esc(p.description)}">${esc(p.title)}</button>`
+    ).join("") : '<p class="muted">No presets available.</p>';
+
+    $("#preset-cards").onclick = (ev) => {
+      const b = ev.target.closest("[data-preset]"); if (!b) return;
+      const p = presets.find(x => x.id === b.dataset.preset);
+      const grants = Object.entries(p.grants).map(([r, t]) => `${r} → ${t}`).join(", ");
+      $("#preset-form").classList.remove("hidden");
+      $("#preset-form").innerHTML = `
+        <h3>${esc(p.title)}</h3>
+        <p class="muted">${esc(p.description)}${grants ? ` · Recommended grants: ${esc(grants)}` : ""}</p>
+        <div class="row" style="flex-wrap:wrap">
+          ${p.params.map(prm => `
+            <label style="min-width:280px; flex:1">${esc(prm.label)}${prm.required === false ? ' <span class="muted">(optional)</span>' : ""}
+              <input data-param="${esc(prm.key)}" type="${prm.secret ? "password" : "text"}"
+                     placeholder="${esc(prm.placeholder ?? "")}" style="width:100%">
+            </label>`).join("")}
+          <button class="btn secondary" id="preset-test">Test</button>
+          <button class="btn" id="preset-install">Install</button>
+        </div>
+        <p class="mono" id="preset-result"></p>`;
+
+      const values = () => Object.fromEntries(
+        [...$("#preset-form").querySelectorAll("[data-param]")].map(i => [i.dataset.param, i.value.trim()]));
+
+      $("#preset-test").onclick = async () => {
+        $("#preset-result").textContent = "testing…";
+        try {
+          const dry = await api(`/presets/${encodeURIComponent(p.id)}/install`, {
+            method: "POST", body: JSON.stringify({ params: values(), dryRun: true }) });
+          const r = await api("/preflight", { method: "POST", body: JSON.stringify(dry.spec) });
+          $("#preset-result").textContent = r.ok
+            ? `✓ ${r.toolCount} tools: ${r.tools.slice(0, 8).join(", ")}${r.toolCount > 8 ? "…" : ""}`
+            : `✗ ${r.error}`;
+        } catch (e) { $("#preset-result").textContent = "✗ " + e.message; }
+      };
+      $("#preset-install").onclick = async () => {
+        try {
+          const r = await api(`/presets/${encodeURIComponent(p.id)}/install`, {
+            method: "POST", body: JSON.stringify({ params: values() }) });
+          const applied = r.grants.map(g => `${g.role}→${g.maxTier}`).join(", ");
+          toast(`Installed "${r.id}"${applied ? ` · grants: ${applied}` : ""}`);
+          if (r.warnings.length) toast(r.warnings.join("; "), true);
+          renderUpstreams();
+        } catch (e) { toast(e.message, true); }
+      };
+    };
+  }).catch(() => { $("#preset-cards").innerHTML = ""; });
 
   $("#add-test").onclick = async () => {
     $("#add-result").textContent = "testing…";
