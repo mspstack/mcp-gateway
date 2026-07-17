@@ -166,8 +166,16 @@ async function renderCredentials() {
     [rows, servers] = await Promise.all([api("/credentials"), api("/access").then(d => d.servers)]);
   } catch (e) { el.innerHTML = ""; return; }
 
+  const offers = servers.filter(s => s.connect);
   el.innerHTML = `<section class="panel"><h2>My credentials</h2>
     <p class="muted">Personal credentials for per-user upstreams are written straight to the secret store — the gateway keeps only a reference, never the value.</p>
+    ${offers.map(s => {
+      const connected = rows.some(r => r.upstreamId === s.upstreamId && r.field === s.connect.tokenField);
+      return `<div class="row" style="align-items:center; gap:10px; margin-bottom:8px">
+        <a class="btn" href="/me/connect/${encodeURIComponent(s.upstreamId)}">${connected ? "Reconnect" : "Connect"} ${esc(s.connect.label)} →</a>
+        <span class="muted">${connected ? "connected — one click to refresh the sign-in" : "one click: sign in with Microsoft, the credential is stored for you"}</span>
+      </div>`;
+    }).join("")}
     ${rows.length ? `<table>
       <tr><th>Upstream</th><th>Field</th><th>Reference</th><th>Updated</th><th></th></tr>
       ${rows.map(r => `<tr>
@@ -243,6 +251,16 @@ $("#logout").onclick = () => {
 renderAccess();
 renderCredentials();
 renderConnect();
+
+// Post-redirect feedback from the one-click Connect flow.
+{
+  const params = new URLSearchParams(location.search);
+  if (params.get("connected")) toast(`Connected: ${params.get("connected")} — credential stored`);
+  if (params.get("connectError")) toast(`Connect failed: ${params.get("connectError")} — try again`, true);
+  if (params.get("connected") || params.get("connectError")) {
+    history.replaceState(null, "", "/me");
+  }
+}
 </script>
 </body>
 </html>

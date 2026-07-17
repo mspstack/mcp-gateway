@@ -17,6 +17,7 @@ import { PolicyService } from "./domain/policy.js";
 import { createOidcVerifier } from "./auth/oidc.js";
 import { createLoginService } from "./auth/login.js";
 import { createDirectorySearch } from "./auth/directory.js";
+import { createUserConnectService } from "./auth/user-connect.js";
 import { OpenBaoStore } from "./secrets/openbao.js";
 import { createKeyVaultStore } from "./secrets/keyvault.js";
 import { UpstreamConnection } from "./upstream/connection.js";
@@ -115,6 +116,7 @@ async function main(): Promise<void> {
     oidcVerifier,
     loginService,
     directorySearch,
+    userConnect: config.login && config.oidc ? createUserConnectService(config.oidc) : null,
     adminUiDir: existsSync(adminUiDir) ? adminUiDir : null,
   });
   const httpServer = app.listen(config.port, () => {

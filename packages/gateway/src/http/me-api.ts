@@ -73,11 +73,20 @@ export function createMeRouter(deps: AppDeps, me: MeDeps): Router {
       }
       res.json({
         principal: { label: principal.label, role: principal.roleName },
-        servers: [...byUpstream.entries()].map(([upstreamId, tools]) => ({
-          upstreamId,
-          enabled: !serverOff.has(upstreamId),
-          tools,
-        })),
+        servers: [...byUpstream.entries()].map(([upstreamId, tools]) => {
+          const spec = repo.getUpstream(upstreamId)?.spec;
+          return {
+            upstreamId,
+            enabled: !serverOff.has(upstreamId),
+            // One-click Connect offer (metadata only — the flow itself lives
+            // at /me/connect/:upstreamId and needs the cookie session).
+            connect: spec?.userConnect
+              ? { label: spec.userConnect.label, tokenField: spec.userConnect.tokenField }
+              : null,
+            requiresPersonalCredentials: spec?.requirePersonalCredentials ?? false,
+            tools,
+          };
+        }),
       });
     })
   );
