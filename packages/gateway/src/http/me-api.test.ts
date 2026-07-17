@@ -23,7 +23,10 @@ const upstreamSpec: UpstreamSpec = {
   url: "http://unused/mcp",
   headers: {},
   enabled: true,
-};
+  personalCredentials: [
+    { field: "x-api-key", label: "API key", secret: true, optional: false },
+  ],
+} as UpstreamSpec;
 
 const tools: Tool[] = [
   { name: "read_thing", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
@@ -132,6 +135,14 @@ describe("/api/me", () => {
     // viewer's envelope: read_thing only — write_thing must not even be listed.
     expect(servers[0]!.tools.map((t) => t.name)).toEqual(["read_thing"]);
     expect(servers[0]!.tools[0]!.enabled).toBe(true);
+  });
+
+  it("GET /access exposes declared credential fields for the guided setup form", async () => {
+    const { json } = await me("GET", "/access", "tok-viewer");
+    const servers = json.servers as Array<{ credentialFields: Array<{ field: string; label: string; secret: boolean }> }>;
+    expect(servers[0]!.credentialFields).toEqual([
+      { field: "x-api-key", label: "API key", secret: true, optional: false },
+    ]);
   });
 
   it("PUT /prefs narrows and GET /access reflects it; MCP tools/list agrees", async () => {

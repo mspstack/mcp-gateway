@@ -10,6 +10,7 @@
 
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { ConfigError, loadConfig } from "./config.js";
 import { openDatabase } from "./db/index.js";
 import { Repo } from "./db/repo.js";
@@ -18,6 +19,7 @@ import { createOidcVerifier } from "./auth/oidc.js";
 import { createLoginService } from "./auth/login.js";
 import { createDirectorySearch } from "./auth/directory.js";
 import { createUserConnectService } from "./auth/user-connect.js";
+import { loadPresets } from "./domain/presets.js";
 import { OpenBaoStore } from "./secrets/openbao.js";
 import { createKeyVaultStore } from "./secrets/keyvault.js";
 import { UpstreamConnection } from "./upstream/connection.js";
@@ -64,6 +66,12 @@ async function main(): Promise<void> {
   for (const spec of config.upstreamsFromFile) {
     repo.upsertUpstream(spec, "file");
   }
+
+  // ── presets (builtins + optional mspstack.presets.json next to the config) ──
+  const presets = loadPresets(
+    join(dirname(config.configPath), "mspstack.presets.json")
+  );
+  console.error(`[presets] ${presets.length} installable preset(s) available`);
 
   // ── secrets ──
   const secretStore = config.bao
@@ -117,6 +125,7 @@ async function main(): Promise<void> {
     loginService,
     directorySearch,
     userConnect: config.login && config.oidc ? createUserConnectService(config.oidc) : null,
+    presets,
     adminUiDir: existsSync(adminUiDir) ? adminUiDir : null,
   });
   const httpServer = app.listen(config.port, () => {

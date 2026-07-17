@@ -84,6 +84,9 @@ export function createMeRouter(deps: AppDeps, me: MeDeps): Router {
               ? { label: spec.userConnect.label, tokenField: spec.userConnect.tokenField }
               : null,
             requiresPersonalCredentials: spec?.requirePersonalCredentials ?? false,
+            // Declared personal-credential fields → /me renders a labeled
+            // guided form instead of raw name/value inputs.
+            credentialFields: spec?.personalCredentials ?? [],
             tools,
           };
         }),
