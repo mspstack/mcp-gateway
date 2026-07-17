@@ -407,8 +407,8 @@ async function renderRoles() {
 // ── Users ──
 async function renderUsers() {
   const el = $("#tab-users");
-  const [users, { roles }, mappings, oauthClients] = await Promise.all([
-    api("/users"), api("/roles"), api("/group-mappings"), api("/oauth-clients")]);
+  const [users, { roles }, mappings, oauthClients, status] = await Promise.all([
+    api("/users"), api("/roles"), api("/group-mappings"), api("/oauth-clients"), api("/status")]);
   const roleOpts = (sel) => `<option value="">(none)</option>` +
     roles.map(r => `<option value="${r.id}" ${sel===r.id?"selected":""}>${esc(r.name)}</option>`).join("");
   el.innerHTML = `
@@ -429,8 +429,11 @@ async function renderUsers() {
           <td>${esc((roles.find(r => r.id === m.roleId) || {}).name || m.roleId)}</td>
           <td><button class="btn danger" data-del-map="${m.id}">Delete</button></td></tr>`).join("")}</table>` : '<p class="muted">No mappings.</p>'}
       <div class="row" style="margin-top:10px">
-        <label style="flex:2">Issuer <input id="map-iss" placeholder="https://login.microsoftonline.com/…/v2.0" style="width:100%"></label>
-        <label>Group / claim value <input id="map-claim" placeholder="group object id"></label>
+        <label style="flex:2">Issuer <input id="map-iss" placeholder="https://login.microsoftonline.com/…/v2.0" style="width:100%" value="${esc(status.oidc?.issuer ?? "")}"></label>
+        <label style="position:relative">Group / claim value
+          <input id="map-claim" placeholder="search group by name, or object id" autocomplete="off">
+          <div id="map-claim-results" style="position:absolute; z-index:20; top:100%; left:0; min-width:280px; display:none; background:var(--panel); border:1px solid var(--border); border-radius:6px; max-height:240px; overflow-y:auto; box-shadow:0 6px 20px rgba(0,0,0,.3)"></div>
+        </label>
         <label>Role <select id="map-role">${roles.map(r => `<option value="${r.id}">${esc(r.name)}</option>`).join("")}</select></label>
         <button class="btn" id="map-add">Add</button>
       </div>
@@ -475,6 +478,40 @@ async function renderUsers() {
       renderUsers();
     } catch (e) { toast(e.message, true); }
   };
+
+  // Live group search (app-only Graph via the login app). Degrades silently:
+  // when /directory/search reports configured:false, the field stays a plain
+  // paste-an-object-id input.
+  const claimInput = $("#map-claim");
+  const claimResults = $("#map-claim-results");
+  const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  let claimTimer = null;
+  const hideClaimResults = () => { claimResults.style.display = "none"; claimResults.innerHTML = ""; };
+  claimInput.oninput = () => {
+    if (claimTimer) clearTimeout(claimTimer);
+    const q = claimInput.value.trim();
+    if (q.length < 2 || GUID_RE.test(q)) return hideClaimResults();
+    claimTimer = setTimeout(async () => {
+      try {
+        const { configured, results } = await api(`/directory/search?q=${encodeURIComponent(q)}&type=group`);
+        if (!configured || claimInput.value.trim() !== q) return hideClaimResults();
+        claimResults.innerHTML = results.length ? results.map(r => `
+          <div class="dir-hit" data-id="${esc(r.id)}" style="padding:7px 10px; cursor:pointer">
+            <div>👥 ${esc(r.displayName)}</div>
+            <div class="muted mono" style="font-size:11px">${r.secondary ? esc(r.secondary) + " · " : ""}${esc(r.id.slice(0, 8))}…</div>
+          </div>`).join("") : '<div class="muted" style="padding:7px 10px">no matching groups</div>';
+        claimResults.style.display = "block";
+      } catch { hideClaimResults(); }
+    }, 250);
+  };
+  claimResults.onmousedown = (ev) => {
+    const hit = ev.target.closest(".dir-hit");
+    if (!hit) return;
+    ev.preventDefault();
+    claimInput.value = hit.dataset.id;
+    hideClaimResults();
+  };
+  claimInput.onblur = () => setTimeout(hideClaimResults, 150);
 }
 
 // ── Secrets ──

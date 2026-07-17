@@ -221,6 +221,57 @@ describe("gateway HTTP app", () => {
   });
 });
 
+describe("admin directory search endpoint", () => {
+  it("reports configured:false when no directory search is wired", async () => {
+    const response = await fetch(`${base}/api/directory/search?q=ndr`, {
+      headers: { Authorization: "Bearer tok-admin" },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ configured: false, results: [] });
+  });
+
+  it("is admin-only and proxies to the injected search", async () => {
+    const fakeSearch = {
+      async search(query: string, type: string) {
+        return [{ kind: "group" as const, id: "g1", displayName: `hit:${query}:${type}`, secondary: "" }];
+      },
+    };
+    const app = createApp({
+      config,
+      repo,
+      manager: new UpstreamManager([upstreamSpec], () => fakeLink),
+      policy: new PolicyService(repo),
+      secretStore: null,
+      oidcVerifier: null,
+      directorySearch: fakeSearch,
+      adminUiDir: null,
+    });
+    const server = app.listen(0);
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const asViewer = await fetch(`http://localhost:${port}/api/directory/search?q=ndr`, {
+        headers: { Authorization: "Bearer tok-viewer" },
+      });
+      expect(asViewer.status).toBe(403);
+
+      const asAdmin = await fetch(`http://localhost:${port}/api/directory/search?q=ndr&type=group`, {
+        headers: { Authorization: "Bearer tok-admin" },
+      });
+      const body = (await asAdmin.json()) as { configured: boolean; results: Array<{ displayName: string }> };
+      expect(body.configured).toBe(true);
+      expect(body.results[0]?.displayName).toBe("hit:ndr:group");
+
+      // sub-2-char query returns empty without touching the search
+      const short = await fetch(`http://localhost:${port}/api/directory/search?q=n`, {
+        headers: { Authorization: "Bearer tok-admin" },
+      });
+      expect(await short.json()).toEqual({ configured: true, results: [] });
+    } finally {
+      server.close();
+    }
+  });
+});
+
 describe("originAllowed", () => {
   it("passes absent Origin and localhost; rejects malformed and unlisted", () => {
     expect(originAllowed(undefined, [])).toBe(true);
