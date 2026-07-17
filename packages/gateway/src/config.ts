@@ -63,6 +63,22 @@ const upstreamBase = {
   /** per-user only: refuse shared-credential fallback for callers without personal creds. */
   requirePersonalCredentials: z.boolean().default(false),
   /**
+   * Declared personal-credential fields for per-user upstreams — pure
+   * metadata consumed by /me to render a labeled guided setup form instead
+   * of raw name/value inputs. Policy and connection code ignore it.
+   */
+  personalCredentials: z
+    .array(
+      z.object({
+        field: z.string().min(1).regex(/^[A-Za-z0-9_-]+$/),
+        label: z.string().min(1),
+        secret: z.boolean().default(false),
+        optional: z.boolean().default(false),
+        help: z.string().optional(),
+      })
+    )
+    .optional(),
+  /**
    * One-click "Connect" on /me: the gateway runs an Entra authorization-code
    * + PKCE flow against a PUBLIC client and stores the resulting refresh
    * token as the user's personal credential — no scripts, no copy-paste.

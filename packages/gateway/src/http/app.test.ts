@@ -291,6 +291,90 @@ describe("admin directory search endpoint", () => {
   });
 });
 
+describe("preset install endpoint", () => {
+  const preset = {
+    id: "fam",
+    title: "Family server",
+    description: "test preset",
+    params: [
+      { key: "url", label: "URL", required: true, secret: false },
+    ],
+    spec: {
+      id: "fam",
+      namespace: "fam",
+      transport: "http",
+      url: "{{url}}",
+      headers: { "x-key": "discovery-only" },
+      sessionMode: "per-user",
+      requirePersonalCredentials: true,
+      personalCredentials: [{ field: "x-key", label: "Key", secret: true }],
+    },
+    grants: { viewer: "read", editor: "write", ghost: "destructive" },
+  };
+
+  it("lists, dry-runs without persisting, installs with grants, warns on unknown roles", async () => {
+    const presetRepo = new Repo(openDatabase(":memory:"));
+    const app = createApp({
+      config,
+      repo: presetRepo,
+      manager: new UpstreamManager([], () => fakeLink),
+      policy: new PolicyService(presetRepo),
+      secretStore: null,
+      oidcVerifier: null,
+      presets: [preset as never],
+      adminUiDir: null,
+    });
+    const server = app.listen(0);
+    try {
+      const base2 = `http://localhost:${(server.address() as AddressInfo).port}`;
+      const adminApi = (path: string, init: RequestInit = {}) =>
+        fetch(`${base2}/api${path}`, {
+          ...init,
+          headers: { Authorization: "Bearer tok-admin", "Content-Type": "application/json", ...init.headers },
+        });
+
+      // catalog (no spec template exposed)
+      const catalog = (await (await adminApi("/presets")).json()) as Array<Record<string, unknown>>;
+      expect(catalog[0]!.id).toBe("fam");
+      expect(catalog[0]!).not.toHaveProperty("spec");
+
+      // missing required param → 400, nothing persisted
+      const missing = await adminApi("/presets/fam/install", { method: "POST", body: JSON.stringify({ params: {} }) });
+      expect(missing.status).toBe(400);
+
+      // dry run returns the rendered spec, persists nothing
+      const dry = (await (
+        await adminApi("/presets/fam/install", {
+          method: "POST",
+          body: JSON.stringify({ params: { url: "http://fam.example/mcp" }, dryRun: true }),
+        })
+      ).json()) as { ok: boolean; spec: { url: string; requirePersonalCredentials: boolean } };
+      expect(dry.spec.url).toBe("http://fam.example/mcp");
+      expect(dry.spec.requirePersonalCredentials).toBe(true);
+      expect(presetRepo.getUpstream("fam")).toBeNull();
+
+      // real install: upstream + grants for known roles, warning for the ghost
+      const installed = (await (
+        await adminApi("/presets/fam/install", {
+          method: "POST",
+          body: JSON.stringify({ params: { url: "http://fam.example/mcp" } }),
+        })
+      ).json()) as { ok: boolean; grants: Array<{ role: string; maxTier: string }>; warnings: string[] };
+      expect(installed.ok).toBe(true);
+      expect(installed.grants.map((g) => `${g.role}:${g.maxTier}`).sort()).toEqual(["editor:write", "viewer:read"]);
+      expect(installed.warnings[0]).toContain('"ghost"');
+      expect(presetRepo.getUpstream("fam")?.spec.personalCredentials?.[0]?.field).toBe("x-key");
+      const viewer = presetRepo.roleByName("viewer")!;
+      expect(presetRepo.grantFor(viewer.id, "fam")).toBe("read");
+
+      // unknown preset id
+      expect((await adminApi("/presets/nope/install", { method: "POST", body: "{}" })).status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+});
+
 describe("originAllowed", () => {
   it("passes absent Origin and localhost; rejects malformed and unlisted", () => {
     expect(originAllowed(undefined, [])).toBe(true);
