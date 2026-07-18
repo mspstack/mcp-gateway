@@ -10,7 +10,7 @@ Point Claude (Code, Desktop, or any MCP client) at a single URL; the gateway con
 - **OAuth 2.1 + static tokens** — resource-server auth per the MCP spec (Entra ID or any OIDC provider; RFC 9728 discovery, audience-bound tokens) plus `MCP_TOKENS_<ROLE>` bearer tokens for non-OAuth clients
 - **Zero-config client connect (DCR)** — the gateway hosts its own OAuth authorization server facade (RFC 8414 metadata + RFC 7591 dynamic client registration + rotating refresh tokens), brokering user sign-in to your IdP; `claude mcp add <url>` connects with no pre-provisioned client id — URL only. Registered clients are managed (and revocable) from the admin UI
 - **Roles & policy** — viewer/editor/admin (plus custom roles) gate tools by annotation-derived tiers (read/write/destructive), with per-upstream grants and per-tool allow/deny overrides; enforcement is re-checked at call time
-- **Secrets stay server-side** — upstream API keys live in OpenBao (`bao:path#field` refs) or env vars, injected at connect time; the inbound client token is never passed through to upstreams
+- **Secrets stay server-side** — upstream API keys live in OpenBao (`bao:path#field` refs), Azure Key Vault (`kv:` refs), or env vars, injected at connect time; the inbound client token is never passed through to upstreams
 - **Install from the UI** — one-click **presets** for the MSPStack family (IT Glue, ConnectWise PSA, Planner) that fill BYOK headers, per-user session mode, Connect wiring, and apply recommended role grants (extend with your own via `mspstack.presets.json`); or add any MCP server by URL, npm package (npx), or Docker image; search the official MCP registry; preflight-test before saving; crashed stdio servers restart with backoff
 - **Guided user setup** — upstreams declare their personal-credential fields, so `/me` renders labeled forms (not raw header names), plus ready-to-copy connect snippets: Claude Code CLI (user-scope by default) and JSON config for Desktop/Cursor/VS Code
 - **Admin UI** at `/admin` — status, server management, tool toggles, role matrix, users & group mappings (with live Entra group search when the login app holds the directory-read Graph roles), OAuth client management, secret writes
@@ -31,29 +31,80 @@ claude mcp add --transport http mspstack http://localhost:3100/mcp \
   --header "Authorization: Bearer <your token>"
 ```
 
-Or with Docker (gateway + OpenBao):
+For a real deployment, pick a scenario below.
+
+## Choose your deployment
+
+Auth and secret storage are independent axes: static tokens or OAuth on one side, OpenBao or Azure Key Vault on the other — any combination works in standalone mode. These are the three configurations we document end to end:
+
+| Scenario | Auth | Secret store | Best for |
+| --- | --- | --- | --- |
+| [Standalone with secrets](docs/standalone-secrets.md) | static role tokens | OpenBao (or Key Vault) | no IdP; small known set of users/agents |
+| [Standalone with OAuth](docs/standalone-oauth-entra.md) | Entra ID / OIDC (+ tokens as break-glass) | OpenBao **or** Key Vault | per-user identity, browser sign-in, URL-only connect |
+| [Integrated (MSPStack)](docs/integrated-mode.md) | Entra ID (enforced) | Key Vault (enforced) | gateway as a native MSPStack platform app |
+
+### Standalone with secrets
+
+Per-role bearer tokens + OpenBao. No identity provider required; docker compose brings up the gateway and a dev OpenBao on a private network:
 
 ```bash
 cp .env.example docker/.env   # set MCP_TOKENS_ADMIN
 docker compose -f docker/docker-compose.yml up -d
 ```
 
-## Configuration
+```bash
+MCP_TOKENS_ADMIN="alice:<random>"      # label:token,… per role
+BAO_ADDR=http://openbao:8200
+BAO_TOKEN=…                            # dev; production uses BAO_ROLE_ID/BAO_SECRET_ID
+```
+
+Upstream credentials are stored in OpenBao and referenced as `bao:path#field` — resolved server-side at connect time, never visible to clients. **Guide: [docs/standalone-secrets.md](docs/standalone-secrets.md)** — compose walkthrough, token management, writing secrets, production AppRole setup.
+
+### Standalone with OAuth (Entra ID)
+
+Users sign in with Microsoft to `/admin` and `/me`; MCP clients connect with the URL alone via the gateway's DCR facade; roles map from Entra groups. One confidential Entra app registration covers token validation, browser login, and the AS facade:
+
+```bash
+PUBLIC_URL=https://mcp.example.com
+ENTRA_TENANT_ID=<tenant id>            # or OIDC_ISSUER for any OIDC provider
+OIDC_AUDIENCE=api://<client-id>        # required with an issuer
+AUTH_CLIENT_ID=… AUTH_CLIENT_SECRET=… SESSION_SECRET=…   # all three together
+ADMIN_BOOTSTRAP_SUBJECTS=alice@example.com
+```
+
+Pair it with either secret store — OpenBao, or Azure Key Vault (`KEY_VAULT_URI`) if you're already an Entra shop; standalone + Entra + Key Vault is a first-class combination. **Guide: [docs/standalone-oauth-entra.md](docs/standalone-oauth-entra.md)** — step-by-step Entra app registration (audience, redirect URI, groups claim, Graph permissions), DCR client connect, per-user Connect app, troubleshooting.
+
+### Integrated (MSPStack)
+
+The gateway as a native MSPStack app: `GATEWAY_MODE=integrated` *enforces* Key Vault + Entra (refuses to start without them), guaranteeing real principals for `/me` self-service — personal credentials in Key Vault, narrow-only tool prefs, and `sessionMode: "per-user"` upstreams that run each caller's calls over their own credentials:
+
+```bash
+GATEWAY_MODE=integrated
+KEY_VAULT_URI=https://<vault>.vault.azure.net
+ENTRA_TENANT_ID=… OIDC_AUDIENCE=…      # + AUTH_CLIENT_ID/SECRET, SESSION_SECRET
+```
+
+**Guide: [docs/integrated-mode.md](docs/integrated-mode.md)** — Key Vault auth (managed identity), `kv:` refs, the `/me` surface, per-user upstream sessions.
+
+## Configuration reference
 
 | Env | Purpose |
 | --- | --- |
 | `MCP_TOKENS_ADMIN` / `_EDITOR` / `_VIEWER` / `_<ROLE>` | static bearer tokens, `label:token,…` |
-| `ENTRA_TENANT_ID` or `OIDC_ISSUER` + `OIDC_AUDIENCE` | OAuth 2.1 resource-server mode |
+| `ENTRA_TENANT_ID` or `OIDC_ISSUER` + `OIDC_AUDIENCE` | OAuth 2.1 resource-server mode (`OIDC_AUDIENCE` required with an issuer) |
+| `OIDC_GROUPS_CLAIM` | token claim holding group ids (default `groups`) |
 | `ADMIN_BOOTSTRAP_SUBJECTS` | emails/subs that get admin on first OIDC login |
-| `BAO_ADDR` + `BAO_TOKEN` or `BAO_ROLE_ID`/`BAO_SECRET_ID` | OpenBao secret store (`bao:path#field` refs) |
-| `KEY_VAULT_URI` | Azure Key Vault secret store via `DefaultAzureCredential` (`kv:secret-name` refs; one store at a time) |
-| `GATEWAY_MODE` | `standalone` (default) or `integrated` — integrated (running as a native MSPStack app) requires `KEY_VAULT_URI` + OIDC |
-| `AUTH_CLIENT_ID` / `AUTH_CLIENT_SECRET` / `AUTH_REDIRECT_URI` / `SESSION_SECRET` | interactive login (cookie + PKCE) — the gateway signs users into its own admin/user UI as a confidential OIDC client; also enables the OAuth AS facade (DCR) for standard MCP clients; without these the UI stays token-paste only |
-| `GATEWAY_JWT_SECRET` | HS256 key for gateway-issued access tokens (AS facade); optional — defaults to a key derived from `SESSION_SECRET` |
+| `AUTH_CLIENT_ID` / `AUTH_CLIENT_SECRET` / `SESSION_SECRET` (+ optional `AUTH_REDIRECT_URI`) | interactive login (cookie + PKCE) — browser sign-in for `/admin` and `/me`, and enables the OAuth AS facade (DCR); all-or-nothing, requires an issuer |
+| `GATEWAY_JWT_SECRET` | HS256 key for gateway-issued access tokens; optional — defaults to a key derived from `SESSION_SECRET` |
+| `BAO_ADDR` + `BAO_TOKEN` or `BAO_ROLE_ID`/`BAO_SECRET_ID`, `BAO_MOUNT` | OpenBao secret store (`bao:path#field` refs) |
+| `KEY_VAULT_URI` | Azure Key Vault via `DefaultAzureCredential` (`kv:secret-name` refs; one store at a time) |
+| `GATEWAY_MODE` | `standalone` (default) or `integrated` — integrated requires `KEY_VAULT_URI` + OIDC |
 | `PORT`, `PUBLIC_URL`, `DB_PATH`, `ALLOWED_ORIGINS` | plumbing |
 | `DEV_ALLOW_UNAUTHENTICATED=true` | localhost-dev only; without any auth configured the gateway refuses to start |
 
-Upstreams are managed in the admin UI (stored in SQLite) and/or declared in `mspstack.config.json` (upserted at boot; see `mspstack.config.example.json`). Header/env values accept `${ENV_VAR}` and `bao:path#field` references — resolved at connect time, never stored:
+All knobs are documented inline in [`.env.example`](.env.example).
+
+Upstreams are managed in the admin UI (stored in SQLite) and/or declared in `mspstack.config.json` (upserted at boot; see `mspstack.config.example.json`). Header/env values accept `${ENV_VAR}`, `bao:path#field`, and `kv:secret-name` references — resolved at connect time, never stored:
 
 ```json
 {
