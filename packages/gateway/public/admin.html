@@ -33,12 +33,13 @@
   input, select, textarea { background: var(--panel2); color: var(--text);
     border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; font-size: 13px; }
   input:focus, select:focus { outline: 1px solid var(--accent); }
-  button.btn { background: var(--accent); color: #06121f; border: none; border-radius: 6px;
+  .btn { background: var(--accent); color: #06121f; border: none; border-radius: 6px;
     padding: 7px 14px; font-weight: 600; cursor: pointer; font-size: 13px; }
-  button.btn.secondary { background: var(--panel2); color: var(--text);
+  .btn.secondary { background: var(--panel2); color: var(--text);
     border: 1px solid var(--border); }
-  button.btn.danger { background: var(--err); color: #fff; }
-  button.btn:disabled { opacity: .5; cursor: default; }
+  .btn.danger { background: var(--err); color: #fff; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  a.btn { text-decoration: none; display: inline-block; }
   .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
   .dot.ok { background: var(--ok); } .dot.err { background: var(--err); }
   .dot.off { background: var(--muted); }
