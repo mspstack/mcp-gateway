@@ -284,6 +284,7 @@ export function parseConfigFile(raw: string): UpstreamSpec[] {
 export function parseStaticTokens(env: NodeJS.ProcessEnv): StaticTokenEntry[] {
   const entries: StaticTokenEntry[] = [];
   const seen = new Set<string>();
+  const seenLabels = new Set<string>();
 
   for (const [key, value] of Object.entries(env)) {
     const match = /^MCP_TOKENS_([A-Z0-9_]+)$/.exec(key);
@@ -312,7 +313,16 @@ export function parseStaticTokens(env: NodeJS.ProcessEnv): StaticTokenEntry[] {
         );
         continue;
       }
+      // Labels are identities: /me prefs, personal credentials and per-user
+      // upstream sessions are all keyed by them, so a shared label would leak
+      // one caller's state to another.
+      if (seenLabels.has(label)) {
+        throw new ConfigError(
+          `Duplicate static token label "${label}" (MCP_TOKENS_${match[1]}) — labels identify users on /me (prefs, personal credentials); give every token a unique label`
+        );
+      }
       seen.add(token);
+      seenLabels.add(label);
       entries.push({ token, roleName, label });
     }
   }

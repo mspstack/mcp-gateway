@@ -29,6 +29,13 @@ export function createMeRouter(deps: AppDeps, me: MeDeps): Router {
   const { repo, manager, policy, secretStore } = deps;
   const router = Router();
 
+  // One-click Connect needs the interactive-login cookie flow, the connect
+  // service AND a secret store to land the refresh token in — advertise it
+  // only when the /me/connect routes are actually mounted and functional.
+  const connectAvailable = Boolean(
+    deps.config.login && deps.loginService && deps.userConnect && secretStore
+  );
+
   // Any authenticated principal — no admin requirement here.
   router.use((req: Request & { principal?: Principal }, res: Response, next) => {
     me.resolveAuth(req)
@@ -80,7 +87,7 @@ export function createMeRouter(deps: AppDeps, me: MeDeps): Router {
             enabled: !serverOff.has(upstreamId),
             // One-click Connect offer (metadata only — the flow itself lives
             // at /me/connect/:upstreamId and needs the cookie session).
-            connect: spec?.userConnect
+            connect: connectAvailable && spec?.userConnect
               ? { label: spec.userConnect.label, tokenField: spec.userConnect.tokenField }
               : null,
             requiresPersonalCredentials: spec?.requirePersonalCredentials ?? false,

@@ -510,3 +510,39 @@ describe("gateway-token auth on /mcp + PRM discovery", () => {
     }
   });
 });
+
+describe("browser navigation gate (interactive login configured)", () => {
+  it("/health reports login: true", async () => {
+    const response = await fetch(`${base}/health`);
+    const body = (await response.json()) as { login: boolean };
+    expect(body.login).toBe(true);
+  });
+
+  it("redirects a session-less HTML GET of /me to /auth/login (silent SSO)", async () => {
+    const response = await fetch(`${base}/me`, {
+      redirect: "manual",
+      headers: { Accept: "text/html" },
+    });
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("/auth/login?returnTo=%2Fme");
+  });
+
+  it("?signin=token skips the redirect (break-glass token sign-in)", async () => {
+    const response = await fetch(`${base}/me?signin=token`, {
+      redirect: "manual",
+      headers: { Accept: "text/html" },
+    });
+    // No adminUiDir in this fixture, so the page itself 404s — the point is
+    // that the gate did NOT bounce the request to the IdP.
+    expect(response.status).not.toBe(302);
+  });
+
+  it("redirects a session-less HTML GET of / to /auth/login", async () => {
+    const response = await fetch(`${base}/`, {
+      redirect: "manual",
+      headers: { Accept: "text/html" },
+    });
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("/auth/login?returnTo=%2Fme");
+  });
+});

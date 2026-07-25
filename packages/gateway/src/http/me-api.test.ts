@@ -26,6 +26,13 @@ const upstreamSpec: UpstreamSpec = {
   personalCredentials: [
     { field: "x-api-key", label: "API key", secret: true, optional: false },
   ],
+  userConnect: {
+    kind: "entra-refresh-token",
+    clientId: "pub-client",
+    scopes: "Tasks.ReadWrite",
+    tokenField: "x-user-token",
+    label: "Fake Service",
+  },
 } as UpstreamSpec;
 
 const tools: Tool[] = [
@@ -145,6 +152,15 @@ describe("/api/me", () => {
     ]);
   });
 
+  it("GET /access suppresses connect metadata when interactive login is not configured", async () => {
+    // The spec HAS a userConnect block, but the /me/connect routes are only
+    // mounted with interactive login — advertising the offer would render a
+    // dead button.
+    const { json } = await me("GET", "/access", "tok-viewer");
+    const servers = json.servers as Array<{ connect: unknown }>;
+    expect(servers[0]!.connect).toBeNull();
+  });
+
   it("PUT /prefs narrows and GET /access reflects it; MCP tools/list agrees", async () => {
     const put = await me("PUT", "/prefs", "tok-editor", {
       upstreamId: "fake",
@@ -223,5 +239,66 @@ describe("/api/me", () => {
   it("404s credentials for unknown upstreams", async () => {
     const put = await me("PUT", "/credentials/ghost", "tok-editor", { field: "token", value: "x" });
     expect(put.status).toBe(404);
+  });
+});
+
+describe("/api/me — connect metadata with interactive login configured", () => {
+  let server: HttpServer;
+  let loginBase: string;
+
+  beforeAll(async () => {
+    const loginConfig: GatewayConfig = {
+      ...config,
+      publicUrl: "http://gw.test",
+      oidc: { issuer: "https://login.microsoftonline.com/tenant/v2.0", audience: "api://gw", groupsClaim: "groups" },
+      login: {
+        clientId: "entra-client",
+        clientSecret: "entra-secret",
+        redirectUri: "http://gw.test/auth/callback",
+        sessionSecret: "session-secret-0123456789",
+      },
+      gatewayJwtSecret: "me-api-test-jwt-secret-0123456789",
+    };
+    const localRepo = new Repo(openDatabase(":memory:"));
+    localRepo.upsertUpstream(upstreamSpec, "api");
+    const manager = new UpstreamManager([upstreamSpec], () => fakeLink);
+    await manager.start();
+    const app = createApp({
+      config: loginConfig,
+      repo: localRepo,
+      manager,
+      policy: new PolicyService(localRepo),
+      secretStore: new MemorySecretStore(),
+      oidcVerifier: null,
+      loginService: {
+        async startAuth(returnTo: string) {
+          return { redirectUrl: "https://entra.example/authorize", transient: { codeVerifier: "cv", nonce: "n", state: "s", returnTo } };
+        },
+        async completeAuth() {
+          return { iss: "https://login.microsoftonline.com/tenant/v2.0", sub: "oid-1", email: "u@example.com", groups: [] };
+        },
+      },
+      userConnect: {
+        start: () => ({ redirectUrl: "https://entra.example/connect", codeVerifier: "cv", state: "s" }),
+        async exchangeCode() {
+          return { refreshToken: "rt" };
+        },
+      },
+      adminUiDir: null,
+    });
+    server = app.listen(0);
+    loginBase = `http://localhost:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(() => {
+    server.close();
+  });
+
+  it("GET /access advertises the connect offer when the flow is actually mounted", async () => {
+    const response = await fetch(`${loginBase}/api/me/access`, {
+      headers: { Authorization: "Bearer tok-viewer" },
+    });
+    const json = (await response.json()) as { servers: Array<{ connect: { label: string; tokenField: string } | null }> };
+    expect(json.servers[0]!.connect).toEqual({ label: "Fake Service", tokenField: "x-user-token" });
   });
 });
