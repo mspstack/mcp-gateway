@@ -71,10 +71,10 @@
 <div id="login" class="panel section">
   <section class="panel">
     <h2>Admin sign in</h2>
-    <div class="row">
+    <div class="row hidden" id="oidc-row">
       <a class="btn" id="oidc-btn" href="/auth/login?returnTo=/admin">Sign in with Microsoft</a>
     </div>
-    <p class="muted">Or paste an <b>admin bearer token</b> (a static <code>MCP_TOKENS_ADMIN</code> token or an OIDC access token for this gateway) — break-glass for when interactive login is unavailable.</p>
+    <p class="muted">Paste an <b>admin bearer token</b> (a static <code>MCP_TOKENS_ADMIN</code> token or an OIDC access token for this gateway) — break-glass for when interactive login is unavailable.</p>
     <div class="row">
       <input id="token-input" type="password" placeholder="admin token" style="flex:1">
       <button class="btn secondary" id="login-btn">Sign in with token</button>
@@ -619,6 +619,11 @@ const RENDER = { status: renderStatus, upstreams: renderUpstreams, tools: render
   roles: renderRoles, users: renderUsers, secrets: renderSecrets };
 
 async function boot() {
+  // Show the Microsoft button only when interactive login actually exists —
+  // /health reports it; on failure keep it hidden and rely on the token box.
+  fetch("/health").then(r => r.json())
+    .then(h => $("#oidc-row").classList.toggle("hidden", !h.login))
+    .catch(() => {});
   if (TOKEN) { login(TOKEN); return; }
   // No pasted token — try an existing cookie session (Sign in with Microsoft).
   try {

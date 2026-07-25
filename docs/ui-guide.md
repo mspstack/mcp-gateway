@@ -38,10 +38,11 @@ credentials are keyed by them.
 
 ## `/admin` — operator console
 
-![Admin sign-in](img/admin-signin.png)
+![Admin sign-in on a token-only deployment](img/admin-signin.png)
 
-> The Microsoft button is always rendered here; on a deployment without
-> interactive login just ignore it and paste an admin token.
+As on `/me`, the Microsoft button appears only when interactive login is
+configured (the page checks `/health`); on a token-only deployment you get just
+the token box, shown above.
 
 ### Status
 
