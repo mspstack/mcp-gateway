@@ -58,7 +58,7 @@ BAO_ADDR=http://openbao:8200
 BAO_TOKEN=…                            # dev; production uses BAO_ROLE_ID/BAO_SECRET_ID
 ```
 
-Upstream credentials are stored in OpenBao and referenced as `bao:path#field` — resolved server-side at connect time, never visible to clients. `/admin` and `/me` both work here too: sign in by pasting a token (the token's label is the identity `/me` keys prefs and personal credentials by). **Guide: [docs/standalone-secrets.md](docs/standalone-secrets.md)** — compose walkthrough, token management, writing secrets, production AppRole setup.
+Upstream credentials are stored in OpenBao and referenced as `bao:path#field` — resolved server-side at connect time, never visible to clients. OpenBao itself is optional: `${VAR}` references pull from the gateway's own environment the same way, so the smallest deployment is just tokens + env vars. `/admin` and `/me` both work here too: sign in by pasting a token (the token's label is the identity `/me` keys prefs and personal credentials by). **Guide: [docs/standalone-secrets.md](docs/standalone-secrets.md)** — the env-only variant, compose walkthrough, token management, writing secrets, production AppRole setup.
 
 ### Standalone with OAuth (Entra ID)
 
