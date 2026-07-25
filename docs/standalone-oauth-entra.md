@@ -103,6 +103,63 @@ same app's credentials and needs **Application** (not Delegated) permissions:
 Then **Grant admin consent**. Skip this entirely if you don't mind pasting group
 object ids by hand — the UI degrades to a paste-an-id field.
 
+### 1f. Same result with the Azure CLI
+
+All of step 1 (registration, audience, scope, redirect, groups claim, secret)
+scripted — handy for repeatable setups:
+
+```bash
+az login --tenant <tenant-id> --allow-no-subscriptions
+
+GATEWAY_HOST=mcp.example.com
+
+# Register (single tenant) with the interactive-login redirect
+APP_ID=$(az ad app create --display-name "MCP Gateway" \
+  --sign-in-audience AzureADMyOrg \
+  --web-redirect-uris "https://$GATEWAY_HOST/auth/callback" \
+  --query appId -o tsv)
+OBJ_ID=$(az ad app show --id "$APP_ID" --query id -o tsv)
+
+# Audience URI + gateway.access scope + groups claim in one Graph PATCH
+az rest --method PATCH \
+  --url "https://graph.microsoft.com/v1.0/applications/$OBJ_ID" \
+  --body "{
+    \"identifierUris\": [\"api://$APP_ID\"],
+    \"groupMembershipClaims\": \"SecurityGroup\",
+    \"api\": { \"oauth2PermissionScopes\": [{
+      \"id\": \"$(uuidgen | tr A-Z a-z)\",
+      \"value\": \"gateway.access\",
+      \"type\": \"User\",
+      \"isEnabled\": true,
+      \"adminConsentDisplayName\": \"Access the MCP gateway\",
+      \"adminConsentDescription\": \"Allows access to the MCP gateway\",
+      \"userConsentDisplayName\": \"Access the MCP gateway\",
+      \"userConsentDescription\": \"Allows access to the MCP gateway\"
+    }]}
+  }"
+
+# Service principal (the "enterprise app") + client secret
+az ad sp create --id "$APP_ID" --query id -o tsv
+AUTH_CLIENT_SECRET=$(az ad app credential reset --id "$APP_ID" \
+  --append --display-name gateway --years 1 --query password -o tsv)
+```
+
+Environment mapping: `AUTH_CLIENT_ID=$APP_ID`, `OIDC_AUDIENCE=api://$APP_ID`,
+`AUTH_CLIENT_SECRET` from the last command (pipe it straight into your platform's
+config — avoid echoing it), `ENTRA_TENANT_ID` = the tenant you logged in to.
+
+Optional Graph *application* permissions for the directory typeahead (step 1e) —
+look the ids up instead of hardcoding them:
+
+```bash
+GRAPH=00000003-0000-0000-c000-000000000000
+for role in User.ReadBasic.All Group.Read.All; do
+  ROLE_ID=$(az ad sp show --id $GRAPH --query "appRoles[?value=='$role'].id | [0]" -o tsv)
+  az ad app permission add --id "$APP_ID" --api $GRAPH --api-permissions "$ROLE_ID=Role"
+done
+az ad app permission admin-consent --id "$APP_ID"
+```
+
 ## 2. Configure the gateway
 
 ```bash
@@ -214,6 +271,29 @@ personal credential. This flow uses a **separate public** app registration
    consent if your tenant requires it.
 5. Put the app's client id and scopes into the upstream's `userConnect` config
    (the built-in presets prompt for exactly this).
+
+Or via the Azure CLI (Planner scopes as the example):
+
+```bash
+PUB_ID=$(az ad app create --display-name "MCP Gateway – User Connect" \
+  --sign-in-audience AzureADMyOrg \
+  --public-client-redirect-uris "https://$GATEWAY_HOST/me/connect/callback" \
+  --is-fallback-public-client true \
+  --query appId -o tsv)
+az ad sp create --id "$PUB_ID" --query id -o tsv
+
+# Delegated permissions: look ids up by name, then grant
+GRAPH=00000003-0000-0000-c000-000000000000
+for scope in Tasks.ReadWrite Group.Read.All offline_access; do
+  SCOPE_ID=$(az ad sp show --id $GRAPH \
+    --query "oauth2PermissionScopes[?value=='$scope'].id | [0]" -o tsv)
+  az ad app permission add --id "$PUB_ID" --api $GRAPH --api-permissions "$SCOPE_ID=Scope"
+done
+az ad app permission admin-consent --id "$PUB_ID"   # if your tenant requires it
+```
+
+(`--is-fallback-public-client true` is the CLI spelling of **Allow public client
+flows: Yes**.)
 
 If the token exchange returns no refresh token, the error points at the two
 usual causes: public client flows disabled, or `offline_access` missing.
