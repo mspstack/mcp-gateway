@@ -77,7 +77,8 @@ cp .env.example docker/.env
 docker compose -f docker/docker-compose.yml up -d
 ```
 
-The gateway listens on `http://localhost:3100`; the admin UI is at `/admin`.
+The gateway listens on `http://localhost:3100`; the admin UI is at `/admin`
+(tab-by-tab walkthrough: [UI guide](ui-guide.md)).
 
 > **Dev-mode OpenBao is in-memory and for evaluation only** — every restart wipes
 > stored secrets. For production, run a sealed/unsealed OpenBao with persistent
