@@ -127,6 +127,29 @@ describe("parseStaticTokens", () => {
     expect(entries).toHaveLength(1);
   });
 
+  it("rejects duplicate labels across roles — labels are /me identities", () => {
+    expect(() =>
+      parseStaticTokens({
+        MCP_TOKENS_ADMIN: "ops:tok-1",
+        MCP_TOKENS_VIEWER: "ops:tok-2",
+      } as NodeJS.ProcessEnv)
+    ).toThrow(ConfigError);
+  });
+
+  it("rejects an explicit label colliding with an auto label", () => {
+    expect(() =>
+      parseStaticTokens({ MCP_TOKENS_ADMIN: "tok-1, admin-1:tok-2" } as NodeJS.ProcessEnv)
+    ).toThrow(ConfigError);
+  });
+
+  it("still warns (not throws) when the same label:token pair appears twice", () => {
+    const entries = parseStaticTokens({
+      MCP_TOKENS_ADMIN: "ops:same",
+      MCP_TOKENS_VIEWER: "ops:same",
+    } as NodeJS.ProcessEnv);
+    expect(entries).toEqual([{ token: "same", roleName: "admin", label: "ops" }]);
+  });
+
   it("ignores empty entries and unrelated env vars", () => {
     const entries = parseStaticTokens({
       MCP_TOKENS_VIEWER: " , ,",

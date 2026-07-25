@@ -58,7 +58,7 @@ BAO_ADDR=http://openbao:8200
 BAO_TOKEN=…                            # dev; production uses BAO_ROLE_ID/BAO_SECRET_ID
 ```
 
-Upstream credentials are stored in OpenBao and referenced as `bao:path#field` — resolved server-side at connect time, never visible to clients. **Guide: [docs/standalone-secrets.md](docs/standalone-secrets.md)** — compose walkthrough, token management, writing secrets, production AppRole setup.
+Upstream credentials are stored in OpenBao and referenced as `bao:path#field` — resolved server-side at connect time, never visible to clients. `/admin` and `/me` both work here too: sign in by pasting a token (the token's label is the identity `/me` keys prefs and personal credentials by). **Guide: [docs/standalone-secrets.md](docs/standalone-secrets.md)** — compose walkthrough, token management, writing secrets, production AppRole setup.
 
 ### Standalone with OAuth (Entra ID)
 
@@ -98,7 +98,7 @@ All three run unchanged on Coolify, Dokku, Render, Fly or App Service — with o
 | `ENTRA_TENANT_ID` or `OIDC_ISSUER` + `OIDC_AUDIENCE` | OAuth 2.1 resource-server mode (`OIDC_AUDIENCE` required with an issuer) |
 | `OIDC_GROUPS_CLAIM` | token claim holding group ids (default `groups`) |
 | `ADMIN_BOOTSTRAP_SUBJECTS` | emails/subs that get admin on first OIDC login |
-| `AUTH_CLIENT_ID` / `AUTH_CLIENT_SECRET` / `SESSION_SECRET` (+ optional `AUTH_REDIRECT_URI`) | interactive login (cookie + PKCE) — browser sign-in for `/admin` and `/me`, and enables the OAuth AS facade (DCR); all-or-nothing, requires an issuer |
+| `AUTH_CLIENT_ID` / `AUTH_CLIENT_SECRET` / `SESSION_SECRET` (+ optional `AUTH_REDIRECT_URI`) | interactive login (cookie + PKCE) — "Sign in with Microsoft" on `/admin` and `/me` (both also accept a pasted token without it), and enables the OAuth AS facade (DCR); all-or-nothing, requires an issuer |
 | `GATEWAY_JWT_SECRET` | HS256 key for gateway-issued access tokens; optional — defaults to a key derived from `SESSION_SECRET` |
 | `BAO_ADDR` + `BAO_TOKEN` or `BAO_ROLE_ID`/`BAO_SECRET_ID`, `BAO_MOUNT` | OpenBao secret store (`bao:path#field` refs) |
 | `KEY_VAULT_URI` | Azure Key Vault via `DefaultAzureCredential` (`kv:secret-name` refs; one store at a time) |

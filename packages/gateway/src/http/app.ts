@@ -372,7 +372,14 @@ export function createApp(deps: AppDeps): express.Express {
   };
 
   app.get("/health", (_req: Request, res: Response) => {
-    res.json({ status: "ok", name: SERVER_NAME, version: SERVER_VERSION });
+    // `login` tells browser pages whether interactive sign-in exists, so the
+    // /me sign-in panel can pick between the IdP redirect and token paste.
+    res.json({
+      status: "ok",
+      name: SERVER_NAME,
+      version: SERVER_VERSION,
+      login: Boolean(config.login && deps.loginService),
+    });
   });
 
   // ── RFC 9728 Protected Resource Metadata ─────────────────────
@@ -887,22 +894,28 @@ export function createApp(deps: AppDeps): express.Express {
     // Light browser-navigation gate for the user-facing pages. Only redirects
     // HTML GETs with no session; /api/* is NOT gated (server-side auth is the
     // real boundary). /admin is intentionally NOT gated: admin.html renders its
-    // own sign-in (Microsoft button + break-glass token box).
+    // own sign-in (Microsoft button + break-glass token box). me.html has the
+    // same panel, but keeps the silent-SSO redirect as the default — the
+    // ?signin=token flag skips the gate for break-glass token sign-in.
     const wantsHtml = (req: Request): boolean => (req.headers.accept ?? "").includes("text/html");
     const hasSession = (req: Request): boolean =>
       readSessionClaims(parseCookies(req.headers.cookie)[SESSION_COOKIE], login.sessionSecret) !== null;
+    const wantsTokenSignin = (req: Request): boolean => req.query.signin === "token";
     const toLogin = (res: Response, path: string): void => {
       res.redirect(302, `/auth/login?returnTo=${encodeURIComponent(path)}`);
     };
 
     app.get("/", (req: Request, res: Response) => {
-      if (wantsHtml(req) && !hasSession(req)) return toLogin(res, "/me");
-      res.redirect(302, "/me");
+      if (wantsHtml(req) && !hasSession(req) && !wantsTokenSignin(req)) return toLogin(res, "/me");
+      res.redirect(302, wantsTokenSignin(req) ? "/me?signin=token" : "/me");
     });
     app.get("/me", (req: Request, res: Response, next) => {
-      if (wantsHtml(req) && !hasSession(req)) return toLogin(res, "/me");
+      if (wantsHtml(req) && !hasSession(req) && !wantsTokenSignin(req)) return toLogin(res, "/me");
       next();
     });
+  } else {
+    // No interactive login: /me renders its own token sign-in panel.
+    app.get("/", (_req: Request, res: Response) => res.redirect(302, "/me"));
   }
 
   // ── Static pages ─────────────────────────────────────────────

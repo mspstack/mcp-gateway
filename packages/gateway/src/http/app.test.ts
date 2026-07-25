@@ -147,9 +147,17 @@ const listTools = async (token: string, sid: string) =>
   );
 
 describe("gateway HTTP app", () => {
-  it("serves /health without auth", async () => {
+  it("serves /health without auth, reporting login availability", async () => {
     const response = await fetch(`${base}/health`);
     expect(response.status).toBe(200);
+    const body = (await response.json()) as { login: boolean };
+    expect(body.login).toBe(false); // no interactive login on this fixture
+  });
+
+  it("redirects / to /me even without interactive login", async () => {
+    const response = await fetch(`${base}/`, { redirect: "manual" });
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("/me");
   });
 
   it("rejects unauthenticated /mcp requests", async () => {

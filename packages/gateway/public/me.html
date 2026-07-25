@@ -63,6 +63,7 @@
   .tools { margin: 4px 0 0 12px; }
   .tools td { border-bottom: 1px dashed var(--border); }
   .off { opacity: .55; }
+  .hidden { display: none !important; }
 </style>
 </head>
 <body>
@@ -70,10 +71,25 @@
   <h1>My MCP Access</h1>
   <span id="whoami" class="muted"></span>
   <div class="spacer"></div>
-  <button class="btn secondary" id="logout">Sign out</button>
+  <button class="btn secondary hidden" id="logout">Sign out</button>
 </header>
 
-<main>
+<main id="login" class="hidden">
+  <section class="panel">
+    <h2>Sign in</h2>
+    <div class="row hidden" id="oidc-row">
+      <a class="btn" href="/auth/login?returnTo=%2Fme">Sign in with Microsoft</a>
+    </div>
+    <p class="muted">Paste your <b>personal bearer token</b> (a static <code>MCP_TOKENS_*</code> token or an OIDC access token for this gateway).</p>
+    <div class="row">
+      <input id="token-input" type="password" placeholder="bearer token" style="flex:1">
+      <button class="btn secondary" id="login-btn">Sign in with token</button>
+    </div>
+    <p class="muted" id="login-error"></p>
+  </section>
+</main>
+
+<main id="app" class="hidden">
   <div id="access"></div>
   <div id="credentials"></div>
   <div id="connect"></div>
@@ -93,18 +109,44 @@ function toast(msg, isError=false) {
   clearTimeout(el._t); el._t = setTimeout(() => el.style.display = "none", 4000);
 }
 
-function toLogin() {
-  location.href = "/auth/login?returnTo=" + encodeURIComponent("/me");
+let TOKEN = sessionStorage.getItem("mspstack-me-token") || "";
+let LOGIN_AVAILABLE = false; // set from GET /health at boot
+// ?signin=token — break-glass: show the token panel instead of the IdP redirect.
+const FORCE_TOKEN_PANEL = new URLSearchParams(location.search).get("signin") === "token";
+
+function showApp() {
+  $("#login").classList.add("hidden"); $("#app").classList.remove("hidden");
+  $("#logout").classList.remove("hidden");
 }
 
-// Cookie session only — no token paste. 401 → bounce to the login flow.
+function showLoginPanel() {
+  $("#oidc-row").classList.toggle("hidden", !LOGIN_AVAILABLE);
+  $("#app").classList.add("hidden"); $("#login").classList.remove("hidden");
+  $("#logout").classList.add("hidden");
+}
+
+// Not signed in (anymore): default to the silent-SSO redirect when interactive
+// login exists — token paste is the fallback for token-only deployments.
+function onAuthFailure() {
+  TOKEN = ""; sessionStorage.removeItem("mspstack-me-token");
+  if (LOGIN_AVAILABLE && !FORCE_TOKEN_PANEL) {
+    location.href = "/auth/login?returnTo=" + encodeURIComponent("/me");
+    return;
+  }
+  showLoginPanel();
+}
+
+// Cookie session when present; pasted bearer token on top (admin.html pattern).
 async function api(path, opts={}) {
   const res = await fetch("/api/me" + path, {
     credentials: "include",
     ...opts,
-    headers: { ...(opts.body ? {"Content-Type": "application/json"} : {}), ...(opts.headers||{}) },
+    headers: { ...(TOKEN ? {"Authorization": "Bearer " + TOKEN} : {}),
+      ...(opts.body ? {"Content-Type": "application/json"} : {}), ...(opts.headers||{}) },
   });
-  if (res.status === 401) { toLogin(); throw new Error("Not signed in"); }
+  // 401 = not signed in → sign-in flow. 403 (signed in, no role) falls through
+  // to the error path below — bouncing it to the IdP would just loop.
+  if (res.status === 401) { onAuthFailure(); throw new Error("Not signed in"); }
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
   return body;
@@ -302,15 +344,57 @@ function renderConnect() {
   });
 }
 
+function renderAll() {
+  renderAccess();
+  renderCredentials();
+  renderConnect();
+}
+
+async function login(token) {
+  TOKEN = token;
+  try {
+    await api("/access");
+    sessionStorage.setItem("mspstack-me-token", token);
+    showApp();
+    renderAll();
+  } catch (e) {
+    TOKEN = "";
+    showLoginPanel();
+    $("#login-error").textContent =
+      "Sign-in failed: " + (e.message === "Not signed in" ? "invalid or expired token" : e.message);
+  }
+}
+
+$("#login-btn").onclick = () => login($("#token-input").value.trim());
+$("#token-input").addEventListener("keydown", e => { if (e.key === "Enter") $("#login-btn").click(); });
+
+// Explicit sign-out also clears any server-side cookie session; the route may
+// not exist on token-only deployments, hence fire-and-forget.
 $("#logout").onclick = () => {
   fetch("/auth/logout", { method: "POST", credentials: "include" })
     .catch(() => {})
-    .finally(() => toLogin());
+    .finally(() => { TOKEN = ""; sessionStorage.removeItem("mspstack-me-token"); showLoginPanel(); });
 };
 
-renderAccess();
-renderCredentials();
-renderConnect();
+async function boot() {
+  // Capability probe: does interactive login exist? Failure must never block
+  // token sign-in, so default to "no".
+  try {
+    const health = await fetch("/health").then(r => r.json());
+    LOGIN_AVAILABLE = Boolean(health.login);
+  } catch { LOGIN_AVAILABLE = false; }
+
+  if (TOKEN) { login(TOKEN); return; }
+  // No pasted token — try the cookie session (Sign in with Microsoft). A 401
+  // inside api() redirects to /auth/login when it exists (silent SSO, same as
+  // before) or reveals the sign-in panel on token-only deployments.
+  try {
+    await api("/access");
+    showApp();
+    renderAll();
+  } catch { /* onAuthFailure already routed the user */ }
+}
+boot();
 
 // Post-redirect feedback from the one-click Connect flow.
 {
