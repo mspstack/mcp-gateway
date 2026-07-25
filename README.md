@@ -43,6 +43,8 @@ Auth and secret storage are independent axes: static tokens or OAuth on one side
 | [Standalone with OAuth](docs/standalone-oauth-entra.md) | Entra ID / OIDC (+ tokens as break-glass) | OpenBao **or** Key Vault | per-user identity, browser sign-in, URL-only connect |
 | [Integrated (MSPStack)](docs/integrated-mode.md) | Entra ID (enforced) | Key Vault (enforced) | gateway as a native MSPStack platform app |
 
+Whichever you pick, the browser surfaces are the same — **[UI guide: /admin and /me](docs/ui-guide.md)** walks every admin tab and the user self-service page, with screenshots.
+
 ### Standalone with secrets
 
 Per-role bearer tokens + OpenBao. No identity provider required; docker compose brings up the gateway and a dev OpenBao on a private network:

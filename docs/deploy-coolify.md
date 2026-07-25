@@ -108,7 +108,8 @@ A healthy first boot logs:
 ```
 
 `0 upstream(s)` is correct on a fresh database. Open `/admin`, sign in with the
-admin token, and add your first server.
+admin token, and add your first server (tab-by-tab walkthrough:
+[UI guide](ui-guide.md)).
 
 ## 5. Prove the volume works
 
