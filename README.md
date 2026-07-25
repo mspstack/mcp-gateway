@@ -86,6 +86,10 @@ ENTRA_TENANT_ID=… OIDC_AUDIENCE=…      # + AUTH_CLIENT_ID/SECRET, SESSION_SE
 
 **Guide: [docs/integrated-mode.md](docs/integrated-mode.md)** — Key Vault auth (managed identity), `kv:` refs, the `/me` surface, per-user upstream sessions.
 
+### Hosting on a container PaaS
+
+All three run unchanged on Coolify, Dokku, Render, Fly or App Service — with one caveat unrelated to auth: those platforms recreate the container on every deploy, so `/data` must be an explicitly declared **named volume** or each deploy silently starts from an empty database. **Guide: [docs/deploy-coolify.md](docs/deploy-coolify.md)** — build settings (the Dockerfile lives under `docker/`), volume ownership, deploying from the API, and how to prove persistence in a single redeploy.
+
 ## Configuration reference
 
 | Env | Purpose |
