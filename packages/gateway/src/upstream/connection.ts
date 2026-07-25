@@ -19,7 +19,10 @@
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import {
+  StreamableHTTPClientTransport,
+  StreamableHTTPError,
+} from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   StdioClientTransport,
   getDefaultEnvironment,
@@ -39,6 +42,19 @@ import { SERVER_NAME, SERVER_VERSION } from "../version.js";
 
 const BACKOFF_INITIAL_MS = 1_000;
 const BACKOFF_MAX_MS = 60_000;
+
+/**
+ * The upstream forgot our streamable-HTTP session while the local transport
+ * still looks healthy — servers answer 404 (spec: "re-initialize") when they
+ * restart or expire sessions server-side. The message fallback catches the
+ * same condition when a proxy or wrapper re-throws it untyped.
+ */
+const isStaleSession = (err: unknown): boolean => {
+  if (err instanceof StreamableHTTPError && err.code === 404) return true;
+  return /unknown or expired mcp session|session not found/i.test(
+    err instanceof Error ? err.message : String(err)
+  );
+};
 
 export interface UpstreamStatus {
   connected: boolean;
@@ -186,19 +202,39 @@ export class UpstreamConnection {
 
   /**
    * Call a tool. If the transport dropped (upstream restart, lost HTTP
-   * session), reconnect and retry exactly once.
+   * session) or the upstream expired our session server-side (404 per the
+   * MCP spec), re-initialize and retry exactly once.
    */
   async callTool(name: string, args: Record<string, unknown>): Promise<CallToolResult> {
     const client = await this.requireClient();
     try {
       return (await client.callTool({ name, arguments: args })) as CallToolResult;
     } catch (err) {
-      if (this.connected) throw err; // upstream answered with an error — not a transport drop
-      console.error(
-        `[upstream:${this.spec.id}] call "${name}" hit a dropped connection — retrying once`
-      );
+      if (this.connected && !isStaleSession(err)) {
+        throw err; // upstream answered with an error — not a session/transport problem
+      }
+      if (this.connected) {
+        console.error(
+          `[upstream:${this.spec.id}] call "${name}" hit an expired upstream session — re-initializing`
+        );
+        await this.resetClient();
+      } else {
+        console.error(
+          `[upstream:${this.spec.id}] call "${name}" hit a dropped connection — retrying once`
+        );
+      }
       const fresh = await this.requireClient();
       return (await fresh.callTool({ name, arguments: args })) as CallToolResult;
+    }
+  }
+
+  /** Drop the pooled client so the next call initializes a fresh session. */
+  private async resetClient(): Promise<void> {
+    const client = this.client;
+    this.client = null;
+    if (client) {
+      client.onclose = undefined; // deliberate reset — no backoff reconnect
+      await client.close().catch(() => undefined);
     }
   }
 
