@@ -306,18 +306,31 @@ async function renderCredentials() {
 // ── Connect ──
 function renderConnect() {
   const url = location.origin + "/mcp";
+  // Without interactive login there is no OAuth facade (no PRM/DCR) — the
+  // URL-alone flow can't work, so clients must send the bearer token as a
+  // header. The pasted token is only embedded when explicitly asked to.
+  const needsHeader = !LOGIN_AVAILABLE;
+  const tokenValue = () =>
+    needsHeader && TOKEN && $("#include-token")?.checked ? TOKEN : "<your-bearer-token>";
   const cliCommand = (userScope) =>
-    `claude mcp add${userScope ? " --scope user" : ""} --transport http mspstack ${url}`;
-  const jsonSnippet = JSON.stringify(
-    { mcpServers: { mspstack: { type: "http", url } } }, null, 2);
+    `claude mcp add${userScope ? " --scope user" : ""} --transport http` +
+    (needsHeader ? ` --header "Authorization: Bearer ${tokenValue()}"` : "") +
+    ` mspstack ${url}`;
+  const jsonSnippet = () => JSON.stringify(
+    { mcpServers: { mspstack: { type: "http", url,
+      ...(needsHeader ? { headers: { Authorization: "Bearer " + tokenValue() } } : {}) } } }, null, 2);
   $("#connect").innerHTML = `<section class="panel"><h2>Connect</h2>
     <p>Point your MCP client at this gateway endpoint:</p>
     <div class="row">
       <input id="mcp-url" class="mono" style="flex:1" readonly value="${esc(url)}">
       <button class="btn secondary" data-copy="${esc(url)}">Copy URL</button>
     </div>
+    ${needsHeader ? `<p class="muted" style="margin-top:12px">This gateway uses bearer-token auth (no interactive sign-in), so MCP clients must send the token as an <code>Authorization</code> header. The CLI command lands in your shell history — prefer the JSON config where that matters.</p>
+    <label style="display:flex; align-items:center; gap:6px; flex-direction:row">
+      <input type="checkbox" id="include-token" style="width:auto"${TOKEN ? "" : " disabled"}>
+      Insert my token into the snippets${TOKEN ? "" : " (sign in with a token to enable)"}</label>` : ""}
     <p class="muted" style="margin-top:12px">Claude Code (CLI):</p>
-    <pre id="mcp-snippet">${esc(cliCommand(true))}</pre>
+    <pre id="mcp-snippet"></pre>
     <div class="row" style="margin-top:6px; align-items:center">
       <label style="display:flex; align-items:center; gap:6px; flex-direction:row">
         <input type="checkbox" id="cli-user-scope" checked style="width:auto">
@@ -325,19 +338,25 @@ function renderConnect() {
       <button class="btn secondary" id="copy-cli">Copy command</button>
     </div>
     <p class="muted" style="margin-top:12px">Claude Desktop / Cursor / VS Code (JSON config):</p>
-    <pre>${esc(jsonSnippet)}</pre>
+    <pre id="json-snippet"></pre>
     <div class="row" style="margin-top:6px">
-      <button class="btn secondary" data-copy="${esc(jsonSnippet)}">Copy JSON</button>
+      <button class="btn secondary" id="copy-json">Copy JSON</button>
     </div>
   </section>`;
   const copy = async (text) => {
     try { await navigator.clipboard.writeText(text); toast("Copied"); }
     catch { toast("Copy failed — select the text manually", true); }
   };
-  $("#cli-user-scope").onchange = () => {
+  const refresh = () => {
     $("#mcp-snippet").textContent = cliCommand($("#cli-user-scope").checked);
+    $("#json-snippet").textContent = jsonSnippet();
   };
+  refresh();
+  $("#cli-user-scope").onchange = refresh;
+  const includeToken = $("#include-token");
+  if (includeToken) includeToken.onchange = refresh;
   $("#copy-cli").onclick = () => copy(cliCommand($("#cli-user-scope").checked));
+  $("#copy-json").onclick = () => copy(jsonSnippet());
   $("#connect").addEventListener("click", (ev) => {
     const b = ev.target.closest("[data-copy]"); if (!b) return;
     copy(b.dataset.copy);
