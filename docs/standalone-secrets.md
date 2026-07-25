@@ -4,6 +4,8 @@ The simplest production-shaped deployment: no identity provider required. Access
 controlled by **per-role bearer tokens**, and upstream API keys live in **OpenBao**
 (or HashiCorp Vault — same KV v2 API), referenced as `bao:path#field` and resolved
 only at connect time. Nothing secret is ever stored in SQLite or client config files.
+Don't want to run OpenBao either? Step 0 covers the store-less variant — plain
+`${VAR}` references into the gateway's environment.
 
 Use this when:
 
@@ -15,6 +17,53 @@ Use this when:
 > OpenBao for **Azure Key Vault** (`KEY_VAULT_URI`, `kv:secret-name` refs) with no
 > other changes — see [Integrated mode](integrated-mode.md#azure-key-vault) for the
 > Key Vault specifics. One store at a time (`BAO_ADDR` xor `KEY_VAULT_URI`).
+
+## 0. No secret store at all: plain environment variables
+
+A secret store is **optional**. Any upstream header/env value may reference a
+variable from the *gateway's own* environment as `${VAR}` — resolved server-side
+at connect time, exactly like `bao:`/`kv:` refs, embedded inside larger values
+too:
+
+```bash
+# gateway environment
+MCP_TOKENS_ADMIN="alice:$(openssl rand -hex 24)"
+ITGLUE_TOKEN="ITG.XXXXXXXX"
+```
+
+```json
+{
+  "upstreams": [
+    {
+      "id": "itglue", "namespace": "itglue", "transport": "http",
+      "url": "http://mcp-itglue:3000/mcp",
+      "headers": { "Authorization": "Bearer ${ITGLUE_TOKEN}" }
+    }
+  ]
+}
+```
+
+No `BAO_*`, no `KEY_VAULT_URI` — this is a complete deployment. The anti-passthrough
+guarantee is identical: values are injected server-side and clients never see them.
+SQLite still stores only the `${ITGLUE_TOKEN}` reference, so the database stays
+free of secrets.
+
+What you give up compared to a real store:
+
+- **Rotation requires a restart** — env vars are read at connect time, but changing
+  them means recreating the process/container (a store re-reads within its 5-minute
+  cache window, no restart).
+- **The values live in your platform's env config** — anyone who can read the
+  compose file / PaaS environment tab sees them. A store narrows that to whoever
+  holds the store's own credentials.
+- **Anything that *writes* secrets needs a store** — the admin UI's secret-write
+  form, `/me` personal credentials (returns `503` without a store), one-click
+  Connect, and `sessionMode: "per-user"` upstreams built on them. Read-only
+  `${VAR}` injection is unaffected.
+
+For one or two upstreams administered by one person this is often all you need;
+start here and graduate to OpenBao when rotation or self-service starts to matter.
+The rest of this guide is the OpenBao variant.
 
 ## 1. Start the stack
 
@@ -130,7 +179,7 @@ list time).
 
 ```bash
 MCP_TOKENS_ADMIN="alice:<random>"        # + _EDITOR/_VIEWER/_<ROLE> as needed
-BAO_ADDR=http://openbao:8200
+BAO_ADDR=http://openbao:8200             # omit BAO_* entirely for the env-only variant (step 0)
 BAO_TOKEN=<dev only>                     # or BAO_ROLE_ID + BAO_SECRET_ID (production)
 BAO_MOUNT=mspstack                       # optional, this is the default
 ```

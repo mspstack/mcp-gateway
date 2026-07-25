@@ -77,6 +77,12 @@ BAO_ADDR=https://openbao.internal:8200
 BAO_ROLE_ID=… BAO_SECRET_ID=…         # or KEY_VAULT_URI instead of BAO_*
 ```
 
+The `BAO_*`/`KEY_VAULT_URI` half is optional: upstream headers can reference the
+gateway's own environment as `${VAR}` (e.g. `Authorization: Bearer ${ITGLUE_TOKEN}`
+with `ITGLUE_TOKEN` set on the app), so the smallest deploy is `PUBLIC_URL` + one
+token + your upstream keys as plain env vars — see
+[the env-only variant](standalone-secrets.md#0-no-secret-store-at-all-plain-environment-variables).
+
 `PUBLIC_URL` must be the address clients actually reach, not the internal one —
 it is echoed in discovery metadata and used to build redirect URIs.
 
