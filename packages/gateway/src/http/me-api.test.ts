@@ -195,6 +195,33 @@ describe("/api/me", () => {
     await me("PUT", "/prefs", "tok-editor", { upstreamId: "fake", toolName: "write_thing", enabled: true });
   });
 
+  it("bulk prefs narrow a whole tier in one call and stay inside the envelope", async () => {
+    // editor sees read_thing (read) + write_thing (write)
+    const hideWrites = await me("PUT", "/prefs", "tok-editor", {
+      upstreamId: "fake",
+      tier: "write",
+      enabled: false,
+    });
+    expect(hideWrites.status).toBe(200);
+    expect(hideWrites.json).toMatchObject({ ok: true, changed: 1 });
+
+    const after = await me("GET", "/access", "tok-editor");
+    const tools = (after.json.servers as Array<{ tools: Array<{ name: string; enabled: boolean }> }>)[0]!.tools;
+    expect(tools.find((t) => t.name === "write_thing")!.enabled).toBe(false);
+    expect(tools.find((t) => t.name === "read_thing")!.enabled).toBe(true);
+
+    // a viewer's write switch touches NOTHING — write_thing is outside their envelope
+    const asViewer = await me("PUT", "/prefs", "tok-viewer", {
+      upstreamId: "fake",
+      tier: "write",
+      enabled: false,
+    });
+    expect(asViewer.json).toMatchObject({ changed: 0 });
+
+    // restore
+    await me("PUT", "/prefs", "tok-editor", { upstreamId: "fake", tier: "write", enabled: true });
+  });
+
   it("rejects prefs for tools outside the envelope (no widening, no junk)", async () => {
     // viewer never sees write_thing — targeting it is a 404, not a stored row.
     const denied = await me("PUT", "/prefs", "tok-viewer", {

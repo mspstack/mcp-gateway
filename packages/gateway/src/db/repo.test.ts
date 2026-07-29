@@ -63,6 +63,34 @@ describe("Repo", () => {
     expect(setting.tierOverride).toBe("read"); // preserved
   });
 
+  it("bulkSetToolEnabled writes the whole set and reports the count", () => {
+    const repo = fresh();
+    const names = ["a", "b", "c"];
+    expect(repo.bulkSetToolEnabled("up", names, false)).toBe(3);
+    for (const n of names) expect(repo.toolSetting("up", n)?.enabled).toBe(false);
+    // re-enabling flips them back, and an existing tier override survives
+    repo.upsertToolSetting({ upstreamId: "up", toolName: "a", tierOverride: "destructive" });
+    expect(repo.bulkSetToolEnabled("up", names, true)).toBe(3);
+    expect(repo.toolSetting("up", "a")).toMatchObject({ enabled: true, tierOverride: "destructive" });
+    expect(repo.bulkSetToolEnabled("up", [], false)).toBe(0);
+  });
+
+  it("bulkSetUserPrefs denies, clears, and opts in", () => {
+    const repo = fresh();
+    const who = "oidc:https://idp|u1";
+    expect(repo.bulkSetUserPrefs(who, "up", ["a", "b"], false)).toBe(2);
+    expect(repo.userPrefFor(who, "up", "a")).toBe(false);
+
+    // enable (default): rows are DELETED — narrowing removed, never widened
+    repo.bulkSetUserPrefs(who, "up", ["a", "b"], true);
+    expect(repo.userPrefFor(who, "up", "a")).toBeNull();
+
+    // opt-in form (off-by-default upstreams): explicit enabled rows
+    repo.bulkSetUserPrefs(who, "up", ["a"], true, true);
+    expect(repo.userPrefFor(who, "up", "a")).toBe(true);
+    expect(repo.listUserPrefs(who).map((p) => p.toolName)).toEqual(["a"]);
+  });
+
   it("upserts users on login and keeps known fields", () => {
     const repo = fresh();
     const user = repo.upsertUserOnLogin({ iss: "https://idp", sub: "u1", email: "a@b.c" });
