@@ -10,10 +10,33 @@ const planner = BUILTIN_PRESETS.find((p) => p.id === "planner")!;
 
 describe("builtin presets", () => {
   it("cover the family and validate against their own schema", () => {
-    expect(BUILTIN_PRESETS.map((p) => p.id).sort()).toEqual(["cwpsa", "itglue", "planner"]);
-    for (const p of BUILTIN_PRESETS) {
+    expect(BUILTIN_PRESETS.map((p) => p.id).sort()).toEqual(["cipp", "cwpsa", "itglue", "planner"]);
+    for (const p of BUILTIN_PRESETS.filter((p) => p.id !== "cipp")) {
       expect(p.grants).toEqual({ viewer: "read", editor: "write" });
     }
+    // CIPP is admin-only by default (its read-tier tools surface secrets).
+    expect(BUILTIN_PRESETS.find((p) => p.id === "cipp")!.grants).toEqual({
+      viewer: "none",
+      editor: "none",
+    });
+  });
+
+  it("cipp renders an oauth2 client-credentials auth block with a secret ref", () => {
+    const spec = renderPreset(BUILTIN_PRESETS.find((p) => p.id === "cipp")!, {
+      url: "https://cipp.example.net/api/ExecMcp",
+      tenantId: "tenant-1",
+      clientId: "client-1",
+      secretRef: "kv:cipp-mcp-secret",
+    });
+    expect(spec.auth).toEqual({
+      kind: "oauth2-client-credentials",
+      tokenUrl: "https://login.microsoftonline.com/tenant-1/oauth2/v2.0/token",
+      clientId: "client-1",
+      clientSecret: "kv:cipp-mcp-secret", // a REF, resolved at connect
+      scope: "api://client-1/.default",
+      header: "Authorization",
+      prefix: "Bearer ",
+    });
   });
 
   it("summaries omit the spec template", () => {
