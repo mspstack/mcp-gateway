@@ -27,6 +27,17 @@ export function exposedNameFor(namespace: string, toolName: string): string {
   return toolName.startsWith(`${namespace}_`) ? toolName : `${namespace}_${toolName}`;
 }
 
+/**
+ * Servers that expose hundreds of tools tend to carry a category path in the
+ * description — CIPP writes "[Identity > Administration > Users] …". Its first
+ * segment makes a natural group for the admin UI's bulk switches, so derive it
+ * when present. An explicit `group_label` in tool_settings always wins.
+ */
+export function derivedGroupOf(tool: Tool): string | null {
+  const match = /^\s*\[([^\]>]+?)(?:\s*>[^\]]*)?\]/.exec(tool.description ?? "");
+  return match ? match[1]!.trim() : null;
+}
+
 export interface CatalogEntry {
   upstreamId: string;
   namespace: string;
