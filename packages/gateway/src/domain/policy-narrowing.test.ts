@@ -32,6 +32,61 @@ function setup() {
   return { repo, policy, editor };
 }
 
+describe("off-by-default upstreams (userDefault: off)", () => {
+  const optInSpec = {
+    id: "up1",
+    namespace: "up1",
+    transport: "http" as const,
+    url: "http://unused/mcp",
+    headers: {},
+    enabled: true,
+    userDefault: "off" as const,
+  };
+
+  it("contributes nothing until the user opts in, per tool or server-wide", () => {
+    const { repo, policy, editor } = setup();
+    repo.upsertUpstream(optInSpec, "api");
+    const write = entry("update_doc", "write");
+    const read = entry("get_doc", "read");
+
+    // inside the envelope, but inactive without an opt-in
+    expect(policy.allowsFor(editor, write)).toBe(false);
+    expect(policy.allowsFor(editor, read)).toBe(false);
+
+    // per-tool opt-in
+    repo.bulkSetUserPrefs(prefsIdentity(editor), "up1", ["update_doc"], true, true);
+    expect(policy.allowsFor(editor, write)).toBe(true);
+    expect(policy.allowsFor(editor, read)).toBe(false);
+
+    // server-wide opt-in covers the rest
+    repo.bulkSetUserPrefs(prefsIdentity(editor), "up1", [""], true, true);
+    expect(policy.allowsFor(editor, read)).toBe(true);
+  });
+
+  it("an opt-in can never widen past the role envelope", () => {
+    const { repo, policy, editor } = setup();
+    repo.upsertUpstream(optInSpec, "api");
+    // editor's ceiling is write — opting into a destructive tool changes nothing
+    repo.bulkSetUserPrefs(prefsIdentity(editor), "up1", ["delete_doc", ""], true, true);
+    expect(policy.allowsFor(editor, entry("delete_doc", "destructive"))).toBe(false);
+  });
+
+  it("a per-tool deny still wins over a server-wide opt-in", () => {
+    const { repo, policy, editor } = setup();
+    repo.upsertUpstream(optInSpec, "api");
+    repo.bulkSetUserPrefs(prefsIdentity(editor), "up1", [""], true, true);
+    repo.bulkSetUserPrefs(prefsIdentity(editor), "up1", ["update_doc"], false);
+    expect(policy.allowsFor(editor, entry("update_doc", "write"))).toBe(false);
+    expect(policy.allowsFor(editor, entry("get_doc", "read"))).toBe(true);
+  });
+
+  it("upstreams without the flag keep the on-by-default behavior", () => {
+    const { repo, policy, editor } = setup();
+    repo.upsertUpstream({ ...optInSpec, userDefault: "on" }, "api");
+    expect(policy.allowsFor(editor, entry("update_doc", "write"))).toBe(true);
+  });
+});
+
 describe("personal narrowing (allowsFor = envelope ∧ prefs)", () => {
   it("defaults to the envelope when no prefs exist", () => {
     const { policy, editor } = setup();

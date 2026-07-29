@@ -62,11 +62,13 @@ export function createMeRouter(deps: AppDeps, me: MeDeps): Router {
       const principal = req.principal!;
       const who = prefsIdentity(principal);
       const prefs = repo.listUserPrefs(who);
-      const serverOff = new Set(prefs.filter((p) => !p.enabled && p.toolName === "").map((p) => p.upstreamId));
-      const toolOff = new Set(prefs.filter((p) => !p.enabled && p.toolName !== "").map((p) => `${p.upstreamId} ${p.toolName}`));
+      const serverPref = new Map(prefs.filter((p) => p.toolName === "").map((p) => [p.upstreamId, p.enabled]));
 
       // Only entries inside the admin envelope are listed at all — personal
       // narrowing is shown on top of them; envelope-denied tools stay invisible.
+      // `enabled` comes from PolicyService.allowsFor — the SAME function the
+      // MCP boundary uses — so the page can never disagree with reality
+      // (including the inverted opt-in rule of userDefault:"off" upstreams).
       const byUpstream = new Map<string, Array<{ name: string; exposedName: string; tier: string; enabled: boolean }>>();
       for (const entry of policy.visibleEntries(principal.roleId, manager.catalogEntries())) {
         const list = byUpstream.get(entry.upstreamId) ?? [];
@@ -74,7 +76,7 @@ export function createMeRouter(deps: AppDeps, me: MeDeps): Router {
           name: entry.upstreamToolName,
           exposedName: entry.exposedName,
           tier: entry.tier,
-          enabled: !serverOff.has(entry.upstreamId) && !toolOff.has(`${entry.upstreamId} ${entry.upstreamToolName}`),
+          enabled: policy.allowsFor(principal, entry),
         });
         byUpstream.set(entry.upstreamId, list);
       }
@@ -82,15 +84,20 @@ export function createMeRouter(deps: AppDeps, me: MeDeps): Router {
         principal: { label: principal.label, role: principal.roleName },
         servers: [...byUpstream.entries()].map(([upstreamId, tools]) => {
           const spec = repo.getUpstream(upstreamId)?.spec;
+          const optIn = spec?.userDefault === "off";
           return {
             upstreamId,
-            enabled: !serverOff.has(upstreamId),
+            // Server switch state: opt-in servers are "on" once an explicit
+            // server-wide opt-in exists; normal ones until a deny appears.
+            enabled: optIn ? serverPref.get(upstreamId) === true : serverPref.get(upstreamId) !== false,
             // One-click Connect offer (metadata only — the flow itself lives
             // at /me/connect/:upstreamId and needs the cookie session).
             connect: connectAvailable && spec?.userConnect
               ? { label: spec.userConnect.label, tokenField: spec.userConnect.tokenField }
               : null,
             requiresPersonalCredentials: spec?.requirePersonalCredentials ?? false,
+            /** "off" = opt-in server: nothing is live until the user enables it. */
+            userDefault: spec?.userDefault ?? "on",
             // Declared personal-credential fields → /me renders a labeled
             // guided form instead of raw name/value inputs.
             credentialFields: spec?.personalCredentials ?? [],
@@ -139,18 +146,29 @@ export function createMeRouter(deps: AppDeps, me: MeDeps): Router {
           if (body.group !== undefined && (setting?.groupLabel ?? "") !== body.group) return false;
           return true;
         });
+        // Opt-in upstreams need explicit enabled rows; for normal ones
+        // "enable" just deletes the personal deny.
+        const optIn = repo.getUpstream(body.upstreamId)?.spec.userDefault === "off";
         const changed = repo.bulkSetUserPrefs(
           prefsIdentity(principal),
           body.upstreamId,
           targets.map((e) => e.upstreamToolName),
-          body.enabled
+          body.enabled,
+          optIn
         );
         me.onPolicyChanged();
         res.json({ ok: true, changed });
         return;
       }
 
-      repo.setUserPref(prefsIdentity(principal), body.upstreamId, body.toolName, body.enabled);
+      // Single tool (or the whole server via toolName ""), same opt-in rule.
+      repo.bulkSetUserPrefs(
+        prefsIdentity(principal),
+        body.upstreamId,
+        [body.toolName],
+        body.enabled,
+        repo.getUpstream(body.upstreamId)?.spec.userDefault === "off"
+      );
       me.onPolicyChanged();
       res.json({ ok: true, changed: 1 });
     })

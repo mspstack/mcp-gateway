@@ -63,6 +63,15 @@ const upstreamBase = {
   /** per-user only: refuse shared-credential fallback for callers without personal creds. */
   requirePersonalCredentials: z.boolean().default(false),
   /**
+   * Whether this upstream's tools are active for a user out of the box.
+   * "on" (default) = today's behavior: everything inside the role envelope is
+   * live until the user narrows it. "off" = opt-in — the server shows up on
+   * /me but contributes nothing until the user enables what they want, which
+   * keeps a 200-tool server from flooding every session. The envelope is still
+   * the ceiling: opting in can never reach a tool the role cannot see.
+   */
+  userDefault: z.enum(["on", "off"]).default("on"),
+  /**
    * Upstreams that want a freshly minted OAuth2 access token rather than a
    * static credential (third-party MCP servers behind Entra/Easy Auth, e.g.
    * CIPP). The gateway performs the client-credentials exchange itself at

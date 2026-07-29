@@ -74,8 +74,17 @@ export class PolicyService {
   allowsFor(principal: Principal, entry: CatalogEntry): boolean {
     if (!this.allows(principal.roleId, entry)) return false;
     const who = prefsIdentity(principal);
-    if (this.repo.userPrefFor(who, entry.upstreamId, "") === false) return false;
-    if (this.repo.userPrefFor(who, entry.upstreamId, entry.upstreamToolName) === false) return false;
+    const serverPref = this.repo.userPrefFor(who, entry.upstreamId, "");
+    const toolPref = this.repo.userPrefFor(who, entry.upstreamId, entry.upstreamToolName);
+    // Off-by-default upstreams invert the personal layer: nothing is live until
+    // the user opts in (server-wide or per tool). The envelope check above is
+    // still the ceiling, so an opt-in can never widen beyond the role.
+    if (this.repo.getUpstream(entry.upstreamId)?.spec.userDefault === "off") {
+      if (serverPref === false || toolPref === false) return false;
+      return serverPref === true || toolPref === true;
+    }
+    if (serverPref === false) return false;
+    if (toolPref === false) return false;
     return true;
   }
 
