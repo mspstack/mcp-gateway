@@ -28,12 +28,21 @@ export function exposedNameFor(namespace: string, toolName: string): string {
 }
 
 /**
- * Servers that expose hundreds of tools tend to carry a category path in the
- * description — CIPP writes "[Identity > Administration > Users] …". Its first
- * segment makes a natural group for the admin UI's bulk switches, so derive it
- * when present. An explicit `group_label` in tool_settings always wins.
+ * The category a tool belongs to, for the group switches in both UIs.
+ * Two sources, in order:
+ *   1. `_meta.group` (or `_meta.toolset`) — the clean, spec-sanctioned way; the
+ *      MSPStack family servers tag their toolsets this way, and it costs no
+ *      description tokens.
+ *   2. a bracketed prefix in the description — CIPP writes
+ *      "[Identity > Administration > Users] …"; its first segment is the group.
+ * An explicit `group_label` in tool_settings always wins over both.
  */
 export function derivedGroupOf(tool: Tool): string | null {
+  const meta = tool._meta as Record<string, unknown> | undefined;
+  for (const key of ["group", "toolset"]) {
+    const value = meta?.[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
   const match = /^\s*\[([^\]>]+?)(?:\s*>[^\]]*)?\]/.exec(tool.description ?? "");
   return match ? match[1]!.trim() : null;
 }

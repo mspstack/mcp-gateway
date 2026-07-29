@@ -155,6 +155,9 @@ async function api(path, opts={}) {
 const tierPill = t => `<span class="pill ${esc(t)}">${esc(t)}</span>`;
 
 // ── My access ──
+/** Which categories are expanded, and how many rows each one shows. */
+const meUi = { openGroup: new Set(), shown: new Map(), PAGE: 25 };
+
 async function renderAccess() {
   const el = $("#access");
   let data;
@@ -193,24 +196,79 @@ async function renderAccess() {
               title="${allOn ? "Hide" : "Show"} all ${tier} tools of ${esc(s.upstreamId)} in my sessions">${allOn ? "✓ " : ""}${tier} <span class="muted">${n}</span></button>`;
           }).join(" ")}
         </h3>
-        <table class="tools">
-          ${s.tools.map(t => `<tr class="${(s.enabled && t.enabled) ? "" : "off"}">
-            <td style="width:48px"><label class="toggle"><input type="checkbox" data-u="${esc(s.upstreamId)}" data-t="${esc(t.name)}" ${t.enabled ? "checked" : ""} ${s.enabled ? "" : "disabled"}><span class="slider"></span></label></td>
-            <td class="mono">${esc(t.exposedName)}</td>
-            <td>${tierPill(t.tier)}</td>
-          </tr>`).join("")}
-        </table>
+        ${(() => {
+          // Categories (server-provided or admin-labelled) so a 200-tool
+          // server is navigable: switch a whole group, or a tier inside it.
+          const cats = new Map();
+          for (const t of s.tools) {
+            const c = cats.get(t.group ?? "") ?? { name: t.group ?? "", tools: [] };
+            c.tools.push(t);
+            cats.set(t.group ?? "", c);
+          }
+          const list = [...cats.values()].sort((a, b) => (a.name || "￿").localeCompare(b.name || "￿"));
+          const single = list.length === 1;
+          return list.map(c => {
+            const key = `${s.upstreamId} ${c.name}`;
+            const open = single || meUi.openGroup.has(key);
+            const on = c.tools.filter(t => t.enabled).length;
+            const limit = meUi.shown.get(key) ?? meUi.PAGE;
+            const rows = c.tools.slice(0, limit);
+            const counts = c.tools.reduce((a, t) => ((a[t.tier] = (a[t.tier] || 0) + 1), a), {});
+            return `
+              ${single ? "" : `<div class="row" style="align-items:center; gap:8px; padding:4px 0">
+                <button class="btn secondary" data-open-group="${esc(key)}">${open ? "▾" : "▸"}</button>
+                <button class="btn ${on > 0 ? "" : "secondary"}" data-bulk-u="${esc(s.upstreamId)}" data-bulk-group="${esc(c.name)}" data-bulk-en="${on > 0 ? "0" : "1"}"
+                  title="${on > 0 ? "Hide" : "Show"} the whole ${esc(c.name || "ungrouped")} group in my sessions">${on > 0 ? "on" : "off"}</button>
+                <b>${esc(c.name || "(ungrouped)")}</b>
+                <span class="muted">${on} of ${c.tools.length}</span>
+                <span style="flex:1"></span>
+                ${["read", "write", "destructive"].map(tier => {
+                  const n = counts[tier] || 0;
+                  if (!n) return "";
+                  const allOn = c.tools.filter(t => t.tier === tier).every(t => t.enabled);
+                  return `<button class="btn secondary" data-bulk-u="${esc(s.upstreamId)}" data-bulk-group="${esc(c.name)}" data-bulk-tier="${tier}" data-bulk-en="${allOn ? "0" : "1"}"
+                    title="${allOn ? "Hide" : "Show"} ${tier} tools in ${esc(c.name || "ungrouped")}">${allOn ? "✓ " : ""}${tier} <span class="muted">${n}</span></button>`;
+                }).join(" ")}
+              </div>`}
+              ${open ? `<table class="tools">
+                ${rows.map(t => `<tr class="${(s.enabled && t.enabled) ? "" : "off"}">
+                  <td style="width:48px"><label class="toggle"><input type="checkbox" data-u="${esc(s.upstreamId)}" data-t="${esc(t.name)}" ${t.enabled ? "checked" : ""}><span class="slider"></span></label></td>
+                  <td class="mono">${esc(t.exposedName)}</td>
+                  <td>${tierPill(t.tier)}</td>
+                </tr>`).join("")}
+              </table>
+              ${c.tools.length > rows.length
+                ? `<button class="btn secondary" data-more="${esc(key)}" style="margin:4px 0">show ${Math.min(meUi.PAGE, c.tools.length - rows.length)} more of ${c.tools.length - rows.length}</button>`
+                : ""}` : ""}`;
+          }).join("");
+        })()}
       </div>`;
     }).join("")}
   </section>`;
 
   el.onclick = async (ev) => {
+    const openGroup = ev.target.closest("[data-open-group]");
+    if (openGroup) {
+      const key = openGroup.dataset.openGroup;
+      meUi.openGroup.has(key) ? meUi.openGroup.delete(key) : meUi.openGroup.add(key);
+      renderAccess();
+      return;
+    }
+    const more = ev.target.closest("[data-more]");
+    if (more) {
+      meUi.shown.set(more.dataset.more, (meUi.shown.get(more.dataset.more) ?? meUi.PAGE) + meUi.PAGE);
+      renderAccess();
+      return;
+    }
     const b = ev.target.closest("[data-bulk-u]");
     if (!b) return;
+    const body = { upstreamId: b.dataset.bulkU, enabled: b.dataset.bulkEn === "1" };
+    if (b.dataset.bulkTier) body.tier = b.dataset.bulkTier;
+    if (b.dataset.bulkGroup !== undefined) body.group = b.dataset.bulkGroup;
+    const what = [b.dataset.bulkTier, b.dataset.bulkGroup].filter(Boolean).join(" in ") || "tool";
     try {
-      const r = await api("/prefs", { method: "PUT", body: JSON.stringify({
-        upstreamId: b.dataset.bulkU, tier: b.dataset.bulkTier, enabled: b.dataset.bulkEn === "1" }) });
-      toast(`${b.dataset.bulkEn === "1" ? "Enabled" : "Hidden"} ${r.changed} ${b.dataset.bulkTier} tool${r.changed === 1 ? "" : "s"}`);
+      const r = await api("/prefs", { method: "PUT", body: JSON.stringify(body) });
+      toast(`${body.enabled ? "Enabled" : "Hidden"} ${r.changed} ${what}${r.changed === 1 ? "" : "s"}`);
       renderAccess();
     } catch (e) { toast(e.message, true); }
   };

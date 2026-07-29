@@ -18,6 +18,7 @@
 import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import { prefsIdentity, principalSlug, type Principal } from "../auth/principal.js";
+import { derivedGroupOf } from "../domain/catalog.js";
 import type { AppDeps, AuthOutcome } from "./app.js";
 
 interface MeDeps {
@@ -69,13 +70,20 @@ export function createMeRouter(deps: AppDeps, me: MeDeps): Router {
       // `enabled` comes from PolicyService.allowsFor — the SAME function the
       // MCP boundary uses — so the page can never disagree with reality
       // (including the inverted opt-in rule of userDefault:"off" upstreams).
-      const byUpstream = new Map<string, Array<{ name: string; exposedName: string; tier: string; enabled: boolean }>>();
+      const byUpstream = new Map<
+        string,
+        Array<{ name: string; exposedName: string; tier: string; group: string; enabled: boolean }>
+      >();
       for (const entry of policy.visibleEntries(principal.roleId, manager.catalogEntries())) {
         const list = byUpstream.get(entry.upstreamId) ?? [];
+        const setting = repo.toolSetting(entry.upstreamId, entry.upstreamToolName);
         list.push({
           name: entry.upstreamToolName,
           exposedName: entry.exposedName,
-          tier: entry.tier,
+          // The effective tier is what the switches act on, overrides included.
+          tier: setting?.tierOverride ?? entry.tier,
+          /** Category for the group switches — explicit label, else derived. */
+          group: setting?.groupLabel ?? derivedGroupOf(entry.tool) ?? "",
           enabled: policy.allowsFor(principal, entry),
         });
         byUpstream.set(entry.upstreamId, list);

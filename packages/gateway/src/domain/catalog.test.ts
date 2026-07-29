@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { buildCatalog, exposedNameFor, exposedTools, tierOf } from "./catalog.js";
+import { buildCatalog, derivedGroupOf, exposedNameFor, exposedTools, tierOf } from "./catalog.js";
 
 const tool = (name: string, annotations?: Tool["annotations"]): Tool => ({
   name,
@@ -19,6 +19,28 @@ describe("tierOf", () => {
 
   it("readOnlyHint wins over destructiveHint", () => {
     expect(tierOf({ readOnlyHint: true, destructiveHint: true })).toBe("read");
+  });
+});
+
+describe("derivedGroupOf", () => {
+  it("prefers _meta.group / _meta.toolset (the family servers' own tagging)", () => {
+    expect(derivedGroupOf({ ...tool("cw_search_tickets"), _meta: { group: "tickets" } })).toBe("tickets");
+    expect(derivedGroupOf({ ...tool("cw_list_my_time"), _meta: { toolset: "time" } })).toBe("time");
+    // _meta wins over a description prefix
+    expect(
+      derivedGroupOf({ ...tool("x"), description: "[Ignored] doc", _meta: { group: "finance" } })
+    ).toBe("finance");
+  });
+
+  it("falls back to a bracketed description prefix (CIPP) and its first segment", () => {
+    expect(derivedGroupOf({ ...tool("ListUsers"), description: "[Identity > Administration > Users] list" })).toBe("Identity");
+    expect(derivedGroupOf({ ...tool("ListStandards"), description: "[Tenant > Standards] list" })).toBe("Tenant");
+  });
+
+  it("returns null when there is nothing to derive", () => {
+    expect(derivedGroupOf(tool("plain"))).toBeNull();
+    expect(derivedGroupOf({ ...tool("plain"), description: "no brackets here" })).toBeNull();
+    expect(derivedGroupOf({ ...tool("plain"), _meta: { group: "  " } })).toBeNull();
   });
 });
 
