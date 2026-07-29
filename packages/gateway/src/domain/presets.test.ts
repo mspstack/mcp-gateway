@@ -24,14 +24,14 @@ describe("builtin presets", () => {
   it("cipp renders an oauth2 client-credentials auth block with a secret ref", () => {
     const spec = renderPreset(BUILTIN_PRESETS.find((p) => p.id === "cipp")!, {
       url: "https://cipp.example.net/api/ExecMcp",
-      tags: "Identity,Endpoint",
       tenantId: "tenant-1",
       clientId: "client-1",
       secretRef: "kv:cipp-mcp-secret",
     });
-    // scoped URL + opt-in, so a 231-tool server can't swamp anyone by accident
+    // Every tool loads; visibility is managed by the group switches, and
+    // opt-in keeps a 231-tool server from swamping anyone by accident.
     if (spec.transport === "http") {
-      expect(spec.url).toBe("https://cipp.example.net/api/ExecMcp?tags=Identity,Endpoint");
+      expect(spec.url).toBe("https://cipp.example.net/api/ExecMcp");
     }
     expect(spec.userDefault).toBe("off");
     expect(spec.auth).toEqual({

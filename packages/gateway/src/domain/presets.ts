@@ -125,17 +125,12 @@ export const BUILTIN_PRESETS: Preset[] = [
     id: "cipp",
     title: "CIPP (CyberDrain Improved Partner Portal)",
     description:
-      "M365 multi-tenant management. The gateway mints its own access token from the CIPP API client credentials, so nothing expires. Scope the tool set with tags — Identity 26, Endpoint 23, Email-Exchange 39, Tenant 38, Security 16, CIPP 33, Tools 5 (all 231 at once is slow to discover). Ships restrictive defaults: admin-only grants and opt-in for users, because CIPP marks even LAPS passwords and BitLocker keys as read-only tools.",
+      "M365 multi-tenant management. The gateway mints its own access token from the CIPP API client credentials, so nothing expires. All tools load; pick the categories you want with the group switches (Identity, Endpoint, Email-Exchange, Tenant, Security, …). Ships restrictive defaults: admin-only grants and opt-in for users, because CIPP marks even LAPS passwords and BitLocker keys as read-only tools.",
     params: [
       {
         key: "url",
         label: "MCP endpoint",
         placeholder: "https://<your-cipp>.azurewebsites.net/api/ExecMcp",
-      },
-      {
-        key: "tags",
-        label: "Tool tags (comma-separated)",
-        placeholder: "Identity,Endpoint,Email-Exchange",
       },
       { key: "tenantId", label: "Entra tenant id" },
       { key: "clientId", label: "CIPP API client id (MCP access enabled)" },
@@ -149,7 +144,7 @@ export const BUILTIN_PRESETS: Preset[] = [
       id: "cipp",
       namespace: "cipp",
       transport: "http",
-      url: "{{url}}?tags={{tags}}",
+      url: "{{url}}",
       headers: {},
       // 200+ tools would swamp every session; users pick what they need.
       userDefault: "off",

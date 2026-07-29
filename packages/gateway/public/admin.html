@@ -202,10 +202,12 @@ async function renderUpstreams() {
   el.innerHTML = `
     <section class="panel"><h2>Configured MCP servers</h2>
       <table>
-        <tr><th>ID</th><th>Namespace</th><th>Transport</th><th>Target</th><th>Source</th><th></th></tr>
+        <tr><th>ID</th><th>Namespace</th><th>Transport</th><th>Target</th><th>Users</th><th>Source</th><th></th></tr>
         ${list.map(u => `<tr>
           <td>${esc(u.id)}</td><td class="mono">${esc(u.namespace)}</td><td>${esc(u.transport)}</td>
           <td class="mono">${esc(u.transport === "http" ? u.url : u.command + " " + (u.args||[]).join(" "))}</td>
+          <td><button class="btn secondary" data-act="userdefault" data-id="${esc(u.id)}"
+            title="off = users must opt in to this server's tools on /me">${(u.userDefault ?? "on") === "on" ? "default on" : "opt-in"}</button></td>
           <td class="muted">${esc(u.source)}</td>
           <td style="white-space:nowrap">
             <button class="btn secondary" data-act="toggle" data-id="${esc(u.id)}" data-en="${!u.enabled}">${u.enabled ? "Disable" : "Enable"}</button>
@@ -228,6 +230,11 @@ async function renderUpstreams() {
         </select></label>
         <label>ID <input id="add-id" placeholder="itglue"></label>
         <label>Namespace <input id="add-ns" placeholder="itglue" pattern="[a-z0-9]+"></label>
+        <label title="off = users see the server on /me but must opt in to its tools — recommended for servers with many tools">
+          Tools for users <select id="add-userdefault">
+            <option value="on">active by default</option>
+            <option value="off">opt-in (off by default)</option>
+          </select></label>
       </div>
       <div class="row" id="add-http">
         <label style="flex:1">URL <input id="add-url" placeholder="http://mcp-itglue:3000/mcp" style="width:100%"></label>
@@ -265,20 +272,21 @@ async function renderUpstreams() {
   const buildSpec = () => {
     const t = $("#add-type").value;
     const id = $("#add-id").value.trim(), namespace = $("#add-ns").value.trim();
+    const userDefault = $("#add-userdefault").value;
     const inject = {};
     $("#add-inject").value.split("\n").map(l => l.trim()).filter(Boolean).forEach(l => {
       const i = l.indexOf(":"); if (i > 0) inject[l.slice(0, i).trim()] = l.slice(i + 1).trim();
     });
-    if (t === "http") return { id, namespace, transport: "http", url: $("#add-url").value.trim(), headers: inject };
+    if (t === "http") return { id, namespace, transport: "http", url: $("#add-url").value.trim(), headers: inject, userDefault };
     if (t === "npm") {
       const pkg = $("#add-pkg").value.trim(), ver = $("#add-ver").value.trim() || "latest";
-      return { id, namespace, transport: "stdio", command: "npx", args: ["-y", `${pkg}@${ver}`], env: inject };
+      return { id, namespace, transport: "stdio", command: "npx", args: ["-y", `${pkg}@${ver}`], env: inject, userDefault };
     }
     const img = $("#add-img").value.trim();
     const args = ["run", "-i", "--rm"];
     Object.keys(inject).forEach(k => args.push("-e", k)); // value stays in spawn env, not argv
     args.push(img);
-    return { id, namespace, transport: "stdio", command: "docker", args, env: inject };
+    return { id, namespace, transport: "stdio", command: "docker", args, env: inject, userDefault };
   };
 
   // ── presets ──
@@ -371,6 +379,13 @@ async function renderUpstreams() {
     try {
       if (b.dataset.act === "toggle") {
         await api(`/upstreams/${b.dataset.id}/enabled`, { method: "POST", body: JSON.stringify({ enabled: b.dataset.en === "true" }) });
+      } else if (b.dataset.act === "userdefault") {
+        // Flip on ↔ off by re-upserting the full spec (grants/settings survive).
+        const spec = list.find(u => u.id === b.dataset.id);
+        const next = (spec.userDefault ?? "on") === "on" ? "off" : "on";
+        const { source, ...clean } = spec;
+        await api(`/upstreams/${encodeURIComponent(spec.id)}`, { method: "PUT", body: JSON.stringify({ ...clean, userDefault: next }) });
+        toast(`"${spec.id}" is now ${next === "on" ? "active by default" : "opt-in"} for users`);
       } else if (b.dataset.act === "delete") {
         if (!confirm(`Delete upstream "${b.dataset.id}"? Its grants and tool settings are removed too.`)) return;
         await api(`/upstreams/${b.dataset.id}`, { method: "DELETE" });
@@ -381,8 +396,12 @@ async function renderUpstreams() {
 }
 
 // ── Tools ──
-/** Tools tab state: which upstream groups are expanded, and the name filter. */
-const toolsUi = { open: new Set(), filter: "", ROW_CAP: 50 };
+/**
+ * Tools tab state: expanded servers, expanded categories, the name filter, and
+ * how many rows each category currently shows (grows via "show more").
+ */
+const toolsUi = { open: new Set(), openGroup: new Set(), filter: "", shown: new Map(), PAGE: 25 };
+const shownFor = (key) => toolsUi.shown.get(key) ?? toolsUi.PAGE;
 
 async function renderTools() {
   const el = $("#tab-tools");
@@ -409,22 +428,36 @@ async function renderTools() {
     <h2>Tool catalog <span class="muted">${enabledCount} of ${tools.length} enabled · ${byUpstream.size} servers</span></h2>
     <p class="muted">Bulk switches apply to every tool of that tier in the group — for all roles.
       Per-role limits live on the Roles tab. Tier shown is the override when set, else the annotation-derived value.</p>
-    <div class="row" style="margin-bottom:10px">
+    <div class="row" style="margin-bottom:10px; align-items:center">
       <input id="tool-filter" placeholder="filter tools…" value="${esc(toolsUi.filter)}" style="flex:1; max-width:280px">
+      <button class="btn secondary" id="tool-refresh" title="Re-read the tool list from every server (also happens automatically when a server announces a change or reconnects)">Re-read from servers</button>
     </div>
     ${[...byUpstream.values()].map(g => {
       const open = toolsUi.open.has(g.id);
       const matching = toolsUi.filter
         ? g.tools.filter(t => t.exposedName.toLowerCase().includes(toolsUi.filter.toLowerCase()))
         : g.tools;
-      const shown = matching.slice(0, toolsUi.ROW_CAP);
+
+      // Second level: categories (explicit label, else derived from the
+      // description) so a server with hundreds of tools is navigable.
+      const cats = new Map();
+      for (const t of matching) {
+        const name = groupOf(t);
+        const c = cats.get(name) ?? { name, tools: [], tiers: { read: 0, write: 0, destructive: 0 }, on: 0 };
+        c.tools.push(t);
+        c.tiers[t.effectiveTier] = (c.tiers[t.effectiveTier] || 0) + 1;
+        if (t.enabled) c.on += 1;
+        cats.set(name, c);
+      }
+      const catList = [...cats.values()].sort((a, b) => (a.name || "￿").localeCompare(b.name || "￿"));
+
       return `<div class="panel" style="background:var(--panel2); margin-bottom:8px; padding:0">
         <div class="row" style="align-items:center; gap:10px; padding:8px 10px; margin:0">
           <button class="btn secondary" data-open="${esc(g.id)}" title="${open ? "collapse" : "expand"}">${open ? "▾" : "▸"}</button>
           <button class="btn ${g.on > 0 ? "" : "secondary"}" data-bulk-u="${esc(g.id)}" data-bulk-en="${g.on > 0 ? "0" : "1"}"
             title="${g.on > 0 ? "Disable" : "Enable"} every tool of ${esc(g.id)}">${g.on > 0 ? "server on" : "server off"}</button>
           <b>${esc(g.id)}</b>
-          <span class="muted">${g.on} of ${g.tools.length} enabled</span>
+          <span class="muted">${g.on} of ${g.tools.length} enabled${catList.length > 1 ? ` · ${catList.length} groups` : ""}</span>
           <span style="flex:1"></span>
           ${["read", "write", "destructive"].map(tier => {
             const n = g.tiers[tier] || 0;
@@ -433,25 +466,61 @@ async function renderTools() {
           }).join(" ")}
         </div>
         ${open ? `<div style="border-top:1px solid var(--border); padding:6px 10px 10px">
-          <table>
-            <tr><th>On</th><th>Tool</th><th>Tier</th><th>Override</th><th>Group</th></tr>
-            ${shown.map(t => `<tr>
-              <td><input type="checkbox" data-u="${esc(t.upstreamId)}" data-t="${esc(t.toolName)}" data-k="enabled" ${t.enabled ? "checked" : ""}></td>
-              <td class="mono" title="${esc(t.description)}">${esc(t.exposedName)}</td>
-              <td>${tierPill(t.effectiveTier)}${t.tierOverride ? ` <span class="muted" style="font-size:11px">override, was ${esc(t.derivedTier)}</span>` : ""}</td>
-              <td><select data-u="${esc(t.upstreamId)}" data-t="${esc(t.toolName)}" data-k="tierOverride">
-                <option value="">(derived)</option>
-                ${["read","write","destructive"].map(x => `<option ${t.tierOverride===x?"selected":""}>${x}</option>`).join("")}
-              </select></td>
-              <td><input size="10" placeholder="${esc(t.derivedGroup || "—")}" value="${esc(t.groupLabel||"")}" data-u="${esc(t.upstreamId)}" data-t="${esc(t.toolName)}" data-k="groupLabel"></td>
-            </tr>`).join("")}
-          </table>
-          ${matching.length > shown.length ? `<p class="muted">…${matching.length - shown.length} more — narrow the filter, or use the switches above</p>` : ""}
+          ${catList.map(c => {
+            const key = `${g.id} ${c.name}`;
+            // A single unnamed category adds nothing over the server row.
+            const bare = catList.length === 1 && c.name === "";
+            const catOpen = bare || toolsUi.openGroup.has(key);
+            const limit = shownFor(key);
+            const rows = c.tools.slice(0, limit);
+            return `<div style="${bare ? "" : "border:1px solid var(--border); border-radius:6px;"} margin-bottom:6px">
+              <div class="row" style="align-items:center; gap:8px; padding:6px 8px; margin:0; ${bare ? "display:none" : ""}">
+                <button class="btn secondary" data-open-group="${esc(key)}">${catOpen ? "▾" : "▸"}</button>
+                <button class="btn ${c.on > 0 ? "" : "secondary"}" data-bulk-u="${esc(g.id)}" data-bulk-group="${esc(c.name)}" data-bulk-en="${c.on > 0 ? "0" : "1"}"
+                  title="${c.on > 0 ? "Disable" : "Enable"} the whole ${esc(c.name || "ungrouped")} group">${c.on > 0 ? "on" : "off"}</button>
+                <b>${esc(c.name || "(ungrouped)")}</b>
+                <span class="muted">${c.on} of ${c.tools.length}</span>
+                <span style="flex:1"></span>
+                ${["read", "write", "destructive"].map(tier => {
+                  const n = c.tiers[tier] || 0;
+                  if (!n) return "";
+                  const allOn = c.tools.filter(t => t.effectiveTier === tier).every(t => t.enabled);
+                  return `<button class="btn secondary" data-bulk-u="${esc(g.id)}" data-bulk-group="${esc(c.name)}" data-bulk-tier="${tier}" data-bulk-en="${allOn ? "0" : "1"}"
+                    title="${allOn ? "Disable" : "Enable"} ${tier} tools in ${esc(c.name || "ungrouped")}">${allOn ? "✓ " : ""}${tier} <span class="muted">${n}</span></button>`;
+                }).join(" ")}
+              </div>
+              ${catOpen ? `<table>
+                <tr><th>On</th><th>Tool</th><th>Tier</th><th>Override</th><th>Group</th></tr>
+                ${rows.map(t => `<tr>
+                  <td><input type="checkbox" data-u="${esc(t.upstreamId)}" data-t="${esc(t.toolName)}" data-k="enabled" ${t.enabled ? "checked" : ""}></td>
+                  <td class="mono" title="${esc(t.description)}">${esc(t.exposedName)}</td>
+                  <td>${tierPill(t.effectiveTier)}${t.tierOverride ? ` <span class="muted" style="font-size:11px">override, was ${esc(t.derivedTier)}</span>` : ""}</td>
+                  <td><select data-u="${esc(t.upstreamId)}" data-t="${esc(t.toolName)}" data-k="tierOverride">
+                    <option value="">(derived)</option>
+                    ${["read","write","destructive"].map(x => `<option ${t.tierOverride===x?"selected":""}>${x}</option>`).join("")}
+                  </select></td>
+                  <td><input size="10" placeholder="${esc(t.derivedGroup || "—")}" value="${esc(t.groupLabel||"")}" data-u="${esc(t.upstreamId)}" data-t="${esc(t.toolName)}" data-k="groupLabel"></td>
+                </tr>`).join("")}
+              </table>
+              ${c.tools.length > rows.length
+                ? `<div style="padding:6px 8px"><button class="btn secondary" data-more="${esc(key)}">show ${Math.min(toolsUi.PAGE, c.tools.length - rows.length)} more of ${c.tools.length - rows.length}</button></div>`
+                : ""}` : ""}
+            </div>`;
+          }).join("")}
           ${matching.length === 0 ? '<p class="muted">no tools match the filter</p>' : ""}
         </div>` : ""}
       </div>`;
     }).join("")}
   </section>`;
+
+  $("#tool-refresh").onclick = async (ev) => {
+    const b = ev.target; b.disabled = true; b.textContent = "re-reading…";
+    try {
+      const r = await api("/catalog/refresh", { method: "POST" });
+      toast(`Re-read ${r.toolCount} tools from ${Object.keys(r.perUpstream).length} server(s)`);
+      renderTools();
+    } catch (e) { toast(e.message, true); b.disabled = false; b.textContent = "Re-read from servers"; }
+  };
 
   $("#tool-filter").oninput = (ev) => {
     toolsUi.filter = ev.target.value;
@@ -468,10 +537,24 @@ async function renderTools() {
       renderTools();
       return;
     }
+    const openGroup = ev.target.closest("[data-open-group]");
+    if (openGroup) {
+      const key = openGroup.dataset.openGroup;
+      toolsUi.openGroup.has(key) ? toolsUi.openGroup.delete(key) : toolsUi.openGroup.add(key);
+      renderTools();
+      return;
+    }
+    const more = ev.target.closest("[data-more]");
+    if (more) {
+      toolsUi.shown.set(more.dataset.more, shownFor(more.dataset.more) + toolsUi.PAGE);
+      renderTools();
+      return;
+    }
     const bulk = ev.target.closest("[data-bulk-u]");
     if (!bulk) return;
     const body = { enabled: bulk.dataset.bulkEn === "1" };
     if (bulk.dataset.bulkTier) body.tier = bulk.dataset.bulkTier;
+    if (bulk.dataset.bulkGroup !== undefined) body.group = bulk.dataset.bulkGroup;
     try {
       const r = await api(`/catalog/${encodeURIComponent(bulk.dataset.bulkU)}`, { method: "PATCH", body: JSON.stringify(body) });
       toast(`${body.enabled ? "Enabled" : "Disabled"} ${r.changed} tool${r.changed === 1 ? "" : "s"}`);
