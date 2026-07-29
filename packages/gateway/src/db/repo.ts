@@ -321,6 +321,70 @@ export class Repo {
       .run(setting.upstreamId, setting.toolName, enabled ? 1 : 0, tierOverride, groupLabel);
   }
 
+  /**
+   * Flip `enabled` for a whole set of tools in one transaction — the admin
+   * bulk switches (a tier or a group of one upstream, or the entire upstream).
+   * Callers resolve the tool names from the live catalog, so this never has to
+   * guess what exists; returns how many rows it wrote.
+   */
+  bulkSetToolEnabled(upstreamId: string, toolNames: string[], enabled: boolean): number {
+    if (toolNames.length === 0) return 0;
+    const upsert = this.db.prepare(
+      `INSERT INTO tool_settings (upstream_id, tool_name, enabled)
+       VALUES (?, ?, ?)
+       ON CONFLICT(upstream_id, tool_name) DO UPDATE SET enabled = excluded.enabled`
+    );
+    this.db.exec("BEGIN");
+    try {
+      for (const toolName of toolNames) upsert.run(upstreamId, toolName, enabled ? 1 : 0);
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+    return toolNames.length;
+  }
+
+  /**
+   * Personal narrowing for a whole set of tools in one transaction.
+   * `enabled=false` writes deny rows; `enabled=true` DELETES them (or, for
+   * off-by-default upstreams, writes explicit opt-in rows) — the caller
+   * decides which via `optIn`, and the envelope is checked before we get here.
+   */
+  bulkSetUserPrefs(
+    principal: string,
+    upstreamId: string,
+    toolNames: string[],
+    enabled: boolean,
+    optIn = false
+  ): number {
+    if (toolNames.length === 0) return 0;
+    const deny = this.db.prepare(
+      `INSERT INTO user_prefs (principal, upstream_id, tool_name, enabled) VALUES (?, ?, ?, 0)
+       ON CONFLICT (principal, upstream_id, tool_name) DO UPDATE SET enabled = 0`
+    );
+    const allow = this.db.prepare(
+      `INSERT INTO user_prefs (principal, upstream_id, tool_name, enabled) VALUES (?, ?, ?, 1)
+       ON CONFLICT (principal, upstream_id, tool_name) DO UPDATE SET enabled = 1`
+    );
+    const clear = this.db.prepare(
+      "DELETE FROM user_prefs WHERE principal = ? AND upstream_id = ? AND tool_name = ?"
+    );
+    this.db.exec("BEGIN");
+    try {
+      for (const toolName of toolNames) {
+        if (!enabled) deny.run(principal, upstreamId, toolName);
+        else if (optIn) allow.run(principal, upstreamId, toolName);
+        else clear.run(principal, upstreamId, toolName);
+      }
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+    return toolNames.length;
+  }
+
   // ── users ──
 
   upsertUserOnLogin(user: {

@@ -109,6 +109,9 @@ export function createMeRouter(deps: AppDeps, me: MeDeps): Router {
         .object({
           upstreamId: z.string().min(1),
           toolName: z.string().default(""),
+          /** Bulk forms: a whole tier and/or group of the upstream at once. */
+          tier: z.enum(["read", "write", "destructive"]).optional(),
+          group: z.string().optional(),
           enabled: z.boolean(),
         })
         .parse(req.body);
@@ -126,9 +129,30 @@ export function createMeRouter(deps: AppDeps, me: MeDeps): Router {
         return;
       }
 
+      // Bulk: resolve the tools from the caller's OWN envelope, so one click
+      // can never touch something they were never allowed to see.
+      if (body.tier || body.group !== undefined) {
+        const targets = envelope.filter((e) => {
+          if (e.upstreamId !== body.upstreamId) return false;
+          const setting = repo.toolSetting(e.upstreamId, e.upstreamToolName);
+          if (body.tier && (setting?.tierOverride ?? e.tier) !== body.tier) return false;
+          if (body.group !== undefined && (setting?.groupLabel ?? "") !== body.group) return false;
+          return true;
+        });
+        const changed = repo.bulkSetUserPrefs(
+          prefsIdentity(principal),
+          body.upstreamId,
+          targets.map((e) => e.upstreamToolName),
+          body.enabled
+        );
+        me.onPolicyChanged();
+        res.json({ ok: true, changed });
+        return;
+      }
+
       repo.setUserPref(prefsIdentity(principal), body.upstreamId, body.toolName, body.enabled);
       me.onPolicyChanged();
-      res.json({ ok: true });
+      res.json({ ok: true, changed: 1 });
     })
   );
 

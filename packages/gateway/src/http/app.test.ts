@@ -299,6 +299,50 @@ describe("admin directory search endpoint", () => {
   });
 });
 
+describe("bulk catalog toggle", () => {
+  const bulk = (body: unknown, upstream = "fake") =>
+    fetch(`${base}/api/catalog/${upstream}`, {
+      method: "PATCH",
+      headers: { Authorization: "Bearer tok-admin", "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  it("switches a whole tier, a whole server, and 404s an unknown upstream", async () => {
+    // fake exposes read_thing (read, annotated) + write_thing (no annotation → write)
+    const readOff = await bulk({ enabled: false, tier: "read" });
+    expect(readOff.status).toBe(200);
+    expect((await readOff.json()) as { changed: number }).toEqual({ ok: true, changed: 1 });
+    expect(repo.toolSetting("fake", "read_thing")?.enabled).toBe(false);
+    expect(repo.toolSetting("fake", "write_thing")?.enabled ?? true).toBe(true); // untouched
+
+    // whole server (no tier) — both tools
+    const allOn = await bulk({ enabled: true });
+    expect((await allOn.json()) as { changed: number }).toMatchObject({ changed: 2 });
+    expect(repo.toolSetting("fake", "read_thing")?.enabled).toBe(true);
+
+    expect((await bulk({ enabled: false }, "nope")).status).toBe(404);
+    // non-admins can't
+    const asViewer = await fetch(`${base}/api/catalog/fake`, {
+      method: "PATCH",
+      headers: { Authorization: "Bearer tok-viewer", "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(asViewer.status).toBe(403);
+  });
+
+  it("matches the EFFECTIVE tier, so an override moves a tool between switches", async () => {
+    repo.upsertToolSetting({ upstreamId: "fake", toolName: "read_thing", tierOverride: "destructive" });
+    try {
+      // read switch now matches nothing; destructive matches the overridden tool
+      expect((await (await bulk({ enabled: false, tier: "read" })).json()) as { changed: number }).toMatchObject({ changed: 0 });
+      expect((await (await bulk({ enabled: false, tier: "destructive" })).json()) as { changed: number }).toMatchObject({ changed: 1 });
+      expect(repo.toolSetting("fake", "read_thing")?.enabled).toBe(false);
+    } finally {
+      repo.upsertToolSetting({ upstreamId: "fake", toolName: "read_thing", tierOverride: null, enabled: true });
+    }
+  });
+});
+
 describe("preset install endpoint", () => {
   const preset = {
     id: "fam",
