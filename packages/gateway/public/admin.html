@@ -381,24 +381,104 @@ async function renderUpstreams() {
 }
 
 // ── Tools ──
+/** Tools tab state: which upstream groups are expanded, and the name filter. */
+const toolsUi = { open: new Set(), filter: "", ROW_CAP: 50 };
+
 async function renderTools() {
   const el = $("#tab-tools");
   const tools = await api("/catalog");
-  el.innerHTML = `<section class="panel"><h2>Tool catalog (${tools.length})</h2>
-    <table>
-      <tr><th>On</th><th>Tool</th><th>Upstream</th><th>Tier</th><th>Override</th><th>Group</th></tr>
-      ${tools.map(t => `<tr>
-        <td><input type="checkbox" data-u="${esc(t.upstreamId)}" data-t="${esc(t.toolName)}" data-k="enabled" ${t.enabled ? "checked" : ""}></td>
-        <td class="mono" title="${esc(t.description)}">${esc(t.exposedName)}</td>
-        <td class="muted">${esc(t.upstreamId)}</td>
-        <td>${tierPill(t.derivedTier)}</td>
-        <td><select data-u="${esc(t.upstreamId)}" data-t="${esc(t.toolName)}" data-k="tierOverride">
-          <option value="">(derived)</option>
-          ${["read","write","destructive"].map(x => `<option ${t.tierOverride===x?"selected":""}>${x}</option>`).join("")}
-        </select></td>
-        <td><input size="10" placeholder="—" value="${esc(t.groupLabel||"")}" data-u="${esc(t.upstreamId)}" data-t="${esc(t.toolName)}" data-k="groupLabel"></td>
-      </tr>`).join("")}
-    </table></section>`;
+  const enabledCount = tools.filter(t => t.enabled).length;
+  const groupOf = (t) => t.groupLabel || t.derivedGroup || "";
+
+  // Group by upstream, then count per effective tier for the bulk switches.
+  const byUpstream = new Map();
+  for (const t of tools) {
+    const g = byUpstream.get(t.upstreamId) ?? { id: t.upstreamId, tools: [], tiers: { read: 0, write: 0, destructive: 0 }, on: 0 };
+    g.tools.push(t);
+    g.tiers[t.effectiveTier] = (g.tiers[t.effectiveTier] || 0) + 1;
+    if (t.enabled) g.on += 1;
+    byUpstream.set(t.upstreamId, g);
+  }
+
+  const tierBtn = (id, tier, n, allOn) => n === 0 ? "" :
+    `<button class="btn secondary" data-bulk-u="${esc(id)}" data-bulk-tier="${tier}" data-bulk-en="${allOn ? "0" : "1"}"
+      title="${allOn ? "Disable" : "Enable"} all ${tier} tools of ${esc(id)} — for every role">
+      ${allOn ? "✓ " : ""}${tier} <span class="muted">${n}</span></button>`;
+
+  el.innerHTML = `<section class="panel">
+    <h2>Tool catalog <span class="muted">${enabledCount} of ${tools.length} enabled · ${byUpstream.size} servers</span></h2>
+    <p class="muted">Bulk switches apply to every tool of that tier in the group — for all roles.
+      Per-role limits live on the Roles tab. Tier shown is the override when set, else the annotation-derived value.</p>
+    <div class="row" style="margin-bottom:10px">
+      <input id="tool-filter" placeholder="filter tools…" value="${esc(toolsUi.filter)}" style="flex:1; max-width:280px">
+    </div>
+    ${[...byUpstream.values()].map(g => {
+      const open = toolsUi.open.has(g.id);
+      const matching = toolsUi.filter
+        ? g.tools.filter(t => t.exposedName.toLowerCase().includes(toolsUi.filter.toLowerCase()))
+        : g.tools;
+      const shown = matching.slice(0, toolsUi.ROW_CAP);
+      return `<div class="panel" style="background:var(--panel2); margin-bottom:8px; padding:0">
+        <div class="row" style="align-items:center; gap:10px; padding:8px 10px; margin:0">
+          <button class="btn secondary" data-open="${esc(g.id)}" title="${open ? "collapse" : "expand"}">${open ? "▾" : "▸"}</button>
+          <button class="btn ${g.on > 0 ? "" : "secondary"}" data-bulk-u="${esc(g.id)}" data-bulk-en="${g.on > 0 ? "0" : "1"}"
+            title="${g.on > 0 ? "Disable" : "Enable"} every tool of ${esc(g.id)}">${g.on > 0 ? "server on" : "server off"}</button>
+          <b>${esc(g.id)}</b>
+          <span class="muted">${g.on} of ${g.tools.length} enabled</span>
+          <span style="flex:1"></span>
+          ${["read", "write", "destructive"].map(tier => {
+            const n = g.tiers[tier] || 0;
+            const allOn = n > 0 && g.tools.filter(t => t.effectiveTier === tier).every(t => t.enabled);
+            return tierBtn(g.id, tier, n, allOn);
+          }).join(" ")}
+        </div>
+        ${open ? `<div style="border-top:1px solid var(--border); padding:6px 10px 10px">
+          <table>
+            <tr><th>On</th><th>Tool</th><th>Tier</th><th>Override</th><th>Group</th></tr>
+            ${shown.map(t => `<tr>
+              <td><input type="checkbox" data-u="${esc(t.upstreamId)}" data-t="${esc(t.toolName)}" data-k="enabled" ${t.enabled ? "checked" : ""}></td>
+              <td class="mono" title="${esc(t.description)}">${esc(t.exposedName)}</td>
+              <td>${tierPill(t.effectiveTier)}${t.tierOverride ? ` <span class="muted" style="font-size:11px">override, was ${esc(t.derivedTier)}</span>` : ""}</td>
+              <td><select data-u="${esc(t.upstreamId)}" data-t="${esc(t.toolName)}" data-k="tierOverride">
+                <option value="">(derived)</option>
+                ${["read","write","destructive"].map(x => `<option ${t.tierOverride===x?"selected":""}>${x}</option>`).join("")}
+              </select></td>
+              <td><input size="10" placeholder="${esc(t.derivedGroup || "—")}" value="${esc(t.groupLabel||"")}" data-u="${esc(t.upstreamId)}" data-t="${esc(t.toolName)}" data-k="groupLabel"></td>
+            </tr>`).join("")}
+          </table>
+          ${matching.length > shown.length ? `<p class="muted">…${matching.length - shown.length} more — narrow the filter, or use the switches above</p>` : ""}
+          ${matching.length === 0 ? '<p class="muted">no tools match the filter</p>' : ""}
+        </div>` : ""}
+      </div>`;
+    }).join("")}
+  </section>`;
+
+  $("#tool-filter").oninput = (ev) => {
+    toolsUi.filter = ev.target.value;
+    const el2 = ev.target;
+    clearTimeout(el2._t);
+    el2._t = setTimeout(() => renderTools().then(() => $("#tool-filter").focus()), 250);
+  };
+
+  el.onclick = async (ev) => {
+    const openBtn = ev.target.closest("[data-open]");
+    if (openBtn) {
+      const id = openBtn.dataset.open;
+      toolsUi.open.has(id) ? toolsUi.open.delete(id) : toolsUi.open.add(id);
+      renderTools();
+      return;
+    }
+    const bulk = ev.target.closest("[data-bulk-u]");
+    if (!bulk) return;
+    const body = { enabled: bulk.dataset.bulkEn === "1" };
+    if (bulk.dataset.bulkTier) body.tier = bulk.dataset.bulkTier;
+    try {
+      const r = await api(`/catalog/${encodeURIComponent(bulk.dataset.bulkU)}`, { method: "PATCH", body: JSON.stringify(body) });
+      toast(`${body.enabled ? "Enabled" : "Disabled"} ${r.changed} tool${r.changed === 1 ? "" : "s"}`);
+      renderTools();
+    } catch (e) { toast(e.message, true); }
+  };
+
   el.onchange = async (ev) => {
     const i = ev.target; if (!i.dataset.k) return;
     const patch = {};
@@ -594,11 +674,24 @@ async function renderSecrets() {
   el.innerHTML = `
     <section class="panel"><h2>Secret store</h2>
       <p>${dot(health.ok)}${esc(health.detail)}</p>
-      <p class="muted">Values are written straight to OpenBao and never stored or displayed by the gateway.
-      Reference them in upstream headers/env as <code>bao:&lt;path&gt;#&lt;field&gt;</code>.</p>
+      <p class="muted">${!health.scheme
+        ? `No secret store is configured, so nothing can be written here. Set <code>KEY_VAULT_URI</code>
+           (Azure Key Vault, <code>kv:</code> refs) or <code>BAO_ADDR</code> (OpenBao, <code>bao:</code> refs).
+           Without a store, upstream headers/env can still reference this process's environment as
+           <code>\${VAR}</code> — resolved server-side at connect time.`
+        : health.scheme === "kv"
+        ? `Values are written straight to Azure Key Vault and never stored or displayed by the gateway.
+           Key Vault has no nested fields, so the gateway stores one secret named
+           <code>&lt;name&gt;-&lt;field&gt;</code> — letters, digits and dashes only.
+           Reference it in upstream headers/env as <code>kv:&lt;name&gt;-&lt;field&gt;</code>,
+           e.g. <code>kv:cipp-mcp-secret</code>.`
+        : `Values are written straight to OpenBao and never stored or displayed by the gateway.
+           KV v2 keeps several fields under one path, so
+           <code>upstreams/itglue</code> can hold both <code>token</code> and <code>region</code>.
+           Reference them in upstream headers/env as <code>bao:&lt;path&gt;#&lt;field&gt;</code>.`}</p>
       <div class="row">
-        <label>Path <input id="sec-path" placeholder="upstreams/itglue"></label>
-        <label>Field <input id="sec-field" placeholder="token"></label>
+        <label>${health.scheme === "kv" ? "Name" : "Path"} <input id="sec-path" placeholder="${health.scheme === "kv" ? "cipp-mcp" : "upstreams/itglue"}"></label>
+        <label>Field <input id="sec-field" placeholder="${health.scheme === "kv" ? "secret" : "token"}"></label>
         <label style="flex:1">Value <input id="sec-value" type="password" style="width:100%"></label>
         <button class="btn" id="sec-save" ${health.ok ? "" : "disabled"}>Save</button>
       </div>
