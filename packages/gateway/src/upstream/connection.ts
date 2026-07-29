@@ -42,6 +42,8 @@ import { SERVER_NAME, SERVER_VERSION } from "../version.js";
 
 const BACKOFF_INITIAL_MS = 1_000;
 const BACKOFF_MAX_MS = 60_000;
+/** Re-mint an OAuth2 upstream token this long before it actually expires. */
+const TOKEN_SKEW_MS = 60_000;
 
 /**
  * The upstream forgot our streamable-HTTP session while the local transport
@@ -69,6 +71,8 @@ export class UpstreamConnection {
   private closed = false;
   private backoffMs = BACKOFF_INITIAL_MS;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  /** When the current connection's minted OAuth2 token goes stale (0 = n/a). */
+  private tokenExpiresAt = 0;
   private status: UpstreamStatus = { connected: false, lastError: null, reconnectAttempts: 0 };
 
   /** Fires when the upstream announces its tool list changed. */
@@ -94,6 +98,12 @@ export class UpstreamConnection {
 
   /** Connect (or join an in-flight connect). Serialized so reconnects never race. */
   async connect(): Promise<void> {
+    // A minted OAuth2 token is fixed for the transport's lifetime, so a stale
+    // one means the whole connection must be rebuilt with a fresh token.
+    if (this.client && this.tokenExpiresAt && Date.now() >= this.tokenExpiresAt) {
+      console.error(`[upstream:${this.spec.id}] access token expiring — reconnecting with a fresh one`);
+      await this.dropClient();
+    }
     if (this.client) return;
     if (this.closed) throw new Error(`upstream "${this.spec.id}" is closed`);
     if (!this.connecting) {
@@ -102,6 +112,63 @@ export class UpstreamConnection {
       });
     }
     return this.connecting;
+  }
+
+  /**
+   * Client-credentials exchange for upstreams that want a minted token rather
+   * than a static credential. The secret itself comes from the store/env like
+   * any other injected value; only the resulting header is added, and neither
+   * the secret nor the token is ever logged.
+   */
+  private async withMintedToken(headers: Record<string, string>): Promise<Record<string, string>> {
+    const auth = this.spec.auth;
+    this.tokenExpiresAt = 0;
+    if (!auth) return headers;
+
+    const clientSecret = await resolveInjectionValue(
+      auth.clientSecret,
+      this.env,
+      this.secretStore,
+      `upstream "${this.spec.id}".auth.clientSecret`
+    );
+    const response = await fetch(auth.tokenUrl, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: auth.clientId,
+        client_secret: clientSecret,
+        scope: auth.scope,
+      }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) {
+      let detail = "";
+      try {
+        const body = (await response.json()) as { error?: string; error_description?: string };
+        // error_description can be long but carries no secret — trim it.
+        detail = ` ${body.error ?? ""}${body.error_description ? `: ${body.error_description.slice(0, 200)}` : ""}`;
+      } catch {
+        // non-JSON error body
+      }
+      throw new Error(`token request failed (${response.status})${detail}`);
+    }
+    const token = (await response.json()) as { access_token?: string; expires_in?: number };
+    if (!token.access_token) throw new Error("token response carried no access_token");
+    this.tokenExpiresAt = Date.now() + (token.expires_in ?? 3600) * 1000 - TOKEN_SKEW_MS;
+    console.error(
+      `[upstream:${this.spec.id}] minted access token via client credentials (expires in ${token.expires_in ?? 3600}s)`
+    );
+    return { ...headers, [auth.header]: `${auth.prefix}${token.access_token}` };
+  }
+
+  /** Tear down the live client without triggering the reconnect supervisor. */
+  private async dropClient(): Promise<void> {
+    const client = this.client;
+    this.client = null;
+    if (!client) return;
+    client.onclose = undefined;
+    await client.close().catch(() => undefined);
   }
 
   private async doConnect(): Promise<void> {
@@ -117,11 +184,13 @@ export class UpstreamConnection {
           this.secretStore,
           `${context}.url`
         );
-        const headers = await resolveInjectionRecord(
-          this.spec.headers,
-          this.env,
-          this.secretStore,
-          `${context}.headers`
+        const headers = await this.withMintedToken(
+          await resolveInjectionRecord(
+            this.spec.headers,
+            this.env,
+            this.secretStore,
+            `${context}.headers`
+          )
         );
         transport = new StreamableHTTPClientTransport(new URL(url), {
           requestInit: { headers },

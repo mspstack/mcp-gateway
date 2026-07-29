@@ -122,6 +122,44 @@ export const BUILTIN_PRESETS: Preset[] = [
     grants: { viewer: "read", editor: "write" },
   }),
   presetSchema.parse({
+    id: "cipp",
+    title: "CIPP (CyberDrain Improved Partner Portal)",
+    description:
+      "M365 multi-tenant management. The gateway mints its own access token from the CIPP API client credentials, so nothing expires. Ships restrictive grants: admin only — CIPP exposes hundreds of read tools including LAPS passwords and BitLocker keys.",
+    params: [
+      {
+        key: "url",
+        label: "MCP endpoint",
+        placeholder: "https://<your-cipp>.azurewebsites.net/api/ExecMcp",
+      },
+      { key: "tenantId", label: "Entra tenant id" },
+      { key: "clientId", label: "CIPP API client id (MCP access enabled)" },
+      {
+        key: "secretRef",
+        label: "Client secret REFERENCE (not the value)",
+        placeholder: "kv:cipp-mcp-secret — write the value on the Secrets tab first",
+      },
+    ],
+    spec: {
+      id: "cipp",
+      namespace: "cipp",
+      transport: "http",
+      url: "{{url}}",
+      headers: {},
+      auth: {
+        kind: "oauth2-client-credentials",
+        tokenUrl: "https://login.microsoftonline.com/{{tenantId}}/oauth2/v2.0/token",
+        clientId: "{{clientId}}",
+        clientSecret: "{{secretRef}}",
+        scope: "api://{{clientId}}/.default",
+      },
+    },
+    // Deliberately restrictive: CIPP's tools arrive annotated read-only even
+    // when they surface secrets, so viewer/editor get nothing until an admin
+    // widens it deliberately (admins keep their destructive default).
+    grants: { viewer: "none", editor: "none" },
+  }),
+  presetSchema.parse({
     id: "planner",
     title: "Microsoft Planner (mcp-planner)",
     description:

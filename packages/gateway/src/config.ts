@@ -63,6 +63,27 @@ const upstreamBase = {
   /** per-user only: refuse shared-credential fallback for callers without personal creds. */
   requirePersonalCredentials: z.boolean().default(false),
   /**
+   * Upstreams that want a freshly minted OAuth2 access token rather than a
+   * static credential (third-party MCP servers behind Entra/Easy Auth, e.g.
+   * CIPP). The gateway performs the client-credentials exchange itself at
+   * connect time, caches the token, and re-mints it when it nears expiry —
+   * the static parts (client id + a secret REF) are all that is stored.
+   */
+  auth: z
+    .object({
+      kind: z.literal("oauth2-client-credentials"),
+      /** Token endpoint, e.g. https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token */
+      tokenUrl: z.string().min(1),
+      clientId: z.string().min(1),
+      /** `${VAR}` / `bao:` / `kv:` ref — resolved at connect, never stored resolved. */
+      clientSecret: z.string().min(1),
+      scope: z.string().min(1),
+      /** Header the token is injected into (default Authorization: Bearer …). */
+      header: z.string().min(1).default("Authorization"),
+      prefix: z.string().default("Bearer "),
+    })
+    .optional(),
+  /**
    * Declared personal-credential fields for per-user upstreams — pure
    * metadata consumed by /me to render a labeled guided setup form instead
    * of raw name/value inputs. Policy and connection code ignore it.
