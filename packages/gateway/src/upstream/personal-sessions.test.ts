@@ -70,6 +70,8 @@ const config: GatewayConfig = {
   publicUrl: "http://localhost:0",
   configPath: "unused",
   dbPath: ":memory:",
+  selfTools: true,
+  backup: { dir: "unused", keep: 3, intervalHours: 0 },
   allowedOrigins: [],
   upstreamsFromFile: [],
   staticTokens: [

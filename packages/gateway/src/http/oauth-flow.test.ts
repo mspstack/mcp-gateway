@@ -31,6 +31,8 @@ const config: GatewayConfig = {
   publicUrl: PUBLIC_URL,
   configPath: "unused",
   dbPath: ":memory:",
+  selfTools: true,
+  backup: { dir: "unused", keep: 3, intervalHours: 0 },
   allowedOrigins: [],
   upstreamsFromFile: [],
   staticTokens: [

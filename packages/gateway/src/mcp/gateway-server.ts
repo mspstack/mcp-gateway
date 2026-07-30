@@ -15,6 +15,7 @@ import {
 import { prefsIdentity, type Principal } from "../auth/principal.js";
 import type { PolicyService } from "../domain/policy.js";
 import type { UpstreamManager } from "../upstream/manager.js";
+import { callSelfTool, SELF_TOOLS, type SelfToolDeps } from "./self-tools.js";
 
 import { SERVER_NAME, SERVER_VERSION } from "../version.js";
 
@@ -27,7 +28,9 @@ export function createGatewayServer(
   manager: UpstreamManager,
   policy: PolicyService,
   principal: Principal,
-  personalCredsFor?: PersonalCredsLookup
+  personalCredsFor?: PersonalCredsLookup,
+  /** Admin-only self-management tools; omit to serve federated tools only. */
+  selfTools?: SelfToolDeps
 ): Server {
   const server = new Server(
     { name: SERVER_NAME, version: SERVER_VERSION },
@@ -37,12 +40,28 @@ export function createGatewayServer(
   // Envelope ∧ personal prefs — the same allowsFor gates list AND call, so
   // a user's own narrowing is enforced at the boundary, not just hidden in UX.
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: policy
-      .visibleEntriesFor(principal, manager.catalogEntries())
-      .map((entry) => ({ ...entry.tool, name: entry.exposedName })),
+    tools: [
+      // Self-management is offered to admins only; for everyone else these
+      // names simply don't exist (the call handler re-checks anyway).
+      ...(selfTools && principal.isAdmin ? SELF_TOOLS : []),
+      ...policy
+        .visibleEntriesFor(principal, manager.catalogEntries())
+        .map((entry) => ({ ...entry.tool, name: entry.exposedName })),
+    ],
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    // The `gw` namespace is reserved (config.ts refuses it for upstreams), so
+    // this can never shadow a federated tool or be shadowed by one.
+    if (selfTools) {
+      const handled = await callSelfTool(
+        selfTools,
+        principal,
+        request.params.name,
+        request.params.arguments ?? {}
+      );
+      if (handled) return handled;
+    }
     const entry = manager.entryFor(request.params.name);
     if (!entry || !policy.allowsFor(principal, entry)) {
       // Same response for unknown and forbidden — no tool-existence oracle.
