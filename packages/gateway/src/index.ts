@@ -13,6 +13,7 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ConfigError, loadConfig } from "./config.js";
 import { openDatabase } from "./db/index.js";
+import { createBlobUploader, startBackupSchedule } from "./db/backup.js";
 import { Repo } from "./db/repo.js";
 import { PolicyService } from "./domain/policy.js";
 import { createOidcVerifier } from "./auth/oidc.js";
@@ -73,6 +74,14 @@ async function main(): Promise<void> {
   );
   console.error(`[presets] ${presets.length} installable preset(s) available`);
 
+  // ── backups ──
+  // State here isn't reproducible from config (upstreams, roles, users, DCR
+  // clients, credential refs), so snapshot it while running.
+  const backupUploader = config.backup.blobContainerUrl
+    ? await createBlobUploader(config.backup.blobContainerUrl)
+    : undefined;
+  const stopBackups = startBackupSchedule(db, config.backup, backupUploader);
+
   // ── secrets ──
   const secretStore = config.bao
     ? new OpenBaoStore(config.bao)
@@ -117,6 +126,8 @@ async function main(): Promise<void> {
   const adminUiDir = fileURLToPath(new URL("../public", import.meta.url));
   const app = createApp({
     config,
+    db,
+    backupUploader,
     repo,
     manager,
     policy,
@@ -138,6 +149,7 @@ async function main(): Promise<void> {
 
   const shutdown = (signal: string): void => {
     console.error(`[gateway] ${signal} received — shutting down`);
+    stopBackups();
     httpServer.close();
     manager
       .stop()

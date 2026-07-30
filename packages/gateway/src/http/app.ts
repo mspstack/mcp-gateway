@@ -26,7 +26,9 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { GatewayConfig } from "../config.js";
+import type { DatabaseSync } from "node:sqlite";
 import type { Repo, RoleRow, UserRow } from "../db/repo.js";
+import type { BackupUploader } from "../db/backup.js";
 import type { PolicyService } from "../domain/policy.js";
 import type { UpstreamManager } from "../upstream/manager.js";
 import type { SecretStore } from "../secrets/store.js";
@@ -71,6 +73,10 @@ import { createMeRouter } from "./me-api.js";
 
 export interface AppDeps {
   config: GatewayConfig;
+  /** The live database — used for on-demand backups (admin API). */
+  db?: DatabaseSync;
+  /** Off-instance backup shipper, when configured. */
+  backupUploader?: BackupUploader;
   repo: Repo;
   manager: UpstreamManager;
   policy: PolicyService;

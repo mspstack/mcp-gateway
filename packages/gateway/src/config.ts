@@ -39,6 +39,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
@@ -211,6 +212,13 @@ export interface GatewayConfig {
   publicUrl: string;
   configPath: string;
   dbPath: string;
+  /** Online SQLite snapshots (VACUUM INTO) + retention + optional off-instance copy. */
+  backup: {
+    dir: string;
+    keep: number;
+    intervalHours: number;
+    blobContainerUrl?: string;
+  };
   allowedOrigins: string[];
   upstreamsFromFile: UpstreamSpec[];
   staticTokens: StaticTokenEntry[];
@@ -503,12 +511,35 @@ export function loadConfig(
     }
   }
 
+  // ── backups ──
+  const backupIntervalRaw = cleanEnv(env.BACKUP_INTERVAL_HOURS) ?? "24";
+  const backupIntervalHours = Number(backupIntervalRaw);
+  if (!Number.isFinite(backupIntervalHours) || backupIntervalHours < 0) {
+    throw new ConfigError(`BACKUP_INTERVAL_HOURS must be a non-negative number, got "${backupIntervalRaw}"`);
+  }
+  const backupKeepRaw = cleanEnv(env.BACKUP_KEEP) ?? "7";
+  const backupKeep = Number(backupKeepRaw);
+  if (!Number.isInteger(backupKeep) || backupKeep < 1) {
+    throw new ConfigError(`BACKUP_KEEP must be a positive integer, got "${backupKeepRaw}"`);
+  }
+  const blobContainerUrl = cleanEnv(env.BACKUP_BLOB_CONTAINER_URL);
+  if (blobContainerUrl && !/^https:\/\//i.test(blobContainerUrl)) {
+    throw new ConfigError(`BACKUP_BLOB_CONTAINER_URL must be an https:// container URL, got "${blobContainerUrl}"`);
+  }
+
   return {
     mode,
     port,
     publicUrl,
     configPath,
     dbPath,
+    backup: {
+      dir: cleanEnv(env.BACKUP_DIR) ?? `${dirname(dbPath)}/backups`,
+      keep: backupKeep,
+      // In-memory databases have nothing durable to snapshot.
+      intervalHours: dbPath === ":memory:" ? 0 : backupIntervalHours,
+      ...(blobContainerUrl ? { blobContainerUrl } : {}),
+    },
     allowedOrigins,
     upstreamsFromFile: parseConfigFile(raw),
     staticTokens: parseStaticTokens(env),
