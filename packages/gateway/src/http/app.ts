@@ -446,13 +446,31 @@ export function createApp(deps: AppDeps): express.Express {
       }
 
       const principal = auth.principal;
-      const server = createGatewayServer(manager, policy, principal, (upstreamId) =>
-        Object.fromEntries(
-          deps.repo
-            .listUserCredentials(prefsIdentity(principal))
-            .filter((row) => row.upstreamId === upstreamId)
-            .map((row) => [row.field, row.secretRef])
-        )
+      const server = createGatewayServer(
+        manager,
+        policy,
+        principal,
+        (upstreamId) =>
+          Object.fromEntries(
+            deps.repo
+              .listUserCredentials(prefsIdentity(principal))
+              .filter((row) => row.upstreamId === upstreamId)
+              .map((row) => [row.field, row.secretRef])
+          ),
+        // Admin-only conversational administration; the toolset itself
+        // re-checks isAdmin on every call.
+        config.selfTools
+          ? {
+              config,
+              repo: deps.repo,
+              manager,
+              policy,
+              presets: deps.presets ?? [],
+              ...(deps.db ? { db: deps.db } : {}),
+              ...(deps.backupUploader ? { backupUploader: deps.backupUploader } : {}),
+              onPolicyChanged: broadcastVisibility,
+            }
+          : undefined
       );
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),

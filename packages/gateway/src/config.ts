@@ -48,6 +48,12 @@ export class ConfigError extends Error {}
 /** Namespaces exclude "_" so exposed tool names stay unambiguous. */
 const NAMESPACE_RE = /^[a-z0-9]+$/;
 
+/**
+ * Reserved for the gateway's own self-management tools (`gw_*`), so a federated
+ * server can never shadow them — or be shadowed by them.
+ */
+export const RESERVED_NAMESPACES = new Set(["gw"]);
+
 const upstreamBase = {
   id: z.string().min(1),
   namespace: z
@@ -212,6 +218,12 @@ export interface GatewayConfig {
   publicUrl: string;
   configPath: string;
   dbPath: string;
+  /**
+   * Expose the admin-only self-management tools (`gw_*`) over MCP. On by
+   * default; `GATEWAY_SELF_TOOLS=off` keeps conversational administration out
+   * of a deployment entirely.
+   */
+  selfTools: boolean;
   /** Online SQLite snapshots (VACUUM INTO) + retention + optional off-instance copy. */
   backup: {
     dir: string;
@@ -269,6 +281,11 @@ export function parseUpstreamSpec(json: unknown): UpstreamSpec {
   const parsed = upstreamSpecSchema.safeParse(json);
   if (!parsed.success) throw new ConfigError(`Invalid upstream: ${parsed.error.message}`);
   const spec = parsed.data;
+  if (RESERVED_NAMESPACES.has(spec.namespace)) {
+    throw new ConfigError(
+      `upstream "${spec.id}": namespace "${spec.namespace}" is reserved by the gateway's own tools — pick another`
+    );
+  }
   // URLs may contain ${VAR}/bao: refs resolved at connect time — only
   // validate the shape when the value is already concrete.
   if (spec.transport === "http" && !spec.url.includes("${") && !spec.url.startsWith("bao:")) {
@@ -533,6 +550,7 @@ export function loadConfig(
     publicUrl,
     configPath,
     dbPath,
+    selfTools: (cleanEnv(env.GATEWAY_SELF_TOOLS) ?? "on").toLowerCase() !== "off",
     backup: {
       dir: cleanEnv(env.BACKUP_DIR) ?? `${dirname(dbPath)}/backups`,
       keep: backupKeep,

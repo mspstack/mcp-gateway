@@ -48,6 +48,8 @@ const config: GatewayConfig = {
   publicUrl: "http://localhost:0",
   configPath: "unused",
   dbPath: ":memory:",
+  selfTools: true,
+  backup: { dir: "unused", keep: 3, intervalHours: 0 },
   allowedOrigins: [],
   upstreamsFromFile: [],
   staticTokens: [
@@ -146,6 +148,10 @@ const listTools = async (token: string, sid: string) =>
     (t) => t.name
   );
 
+/** Federated tools only — admins also get the built-in gw_* self-management set. */
+const listFederated = async (token: string, sid: string) =>
+  (await listTools(token, sid)).filter((n) => !n.startsWith("gw_"));
+
 describe("gateway HTTP app", () => {
   it("serves /health without auth, reporting login availability", async () => {
     const response = await fetch(`${base}/health`);
@@ -175,7 +181,7 @@ describe("gateway HTTP app", () => {
     expect(await listTools("tok-viewer", viewerSid)).toEqual(["fake_read_thing"]);
 
     const adminSid = await initSession("tok-admin");
-    expect((await listTools("tok-admin", adminSid)).sort()).toEqual([
+    expect((await listFederated("tok-admin", adminSid)).sort()).toEqual([
       "fake_read_thing",
       "fake_write_thing",
     ]);
@@ -208,7 +214,7 @@ describe("gateway HTTP app", () => {
     repo.upsertToolSetting({ upstreamId: "fake", toolName: "read_thing", enabled: false });
     try {
       const sid = await initSession("tok-admin");
-      expect(await listTools("tok-admin", sid)).toEqual(["fake_write_thing"]);
+      expect(await listFederated("tok-admin", sid)).toEqual(["fake_write_thing"]);
     } finally {
       repo.upsertToolSetting({ upstreamId: "fake", toolName: "read_thing", enabled: true });
     }
@@ -296,6 +302,64 @@ describe("admin directory search endpoint", () => {
     } finally {
       server.close();
     }
+  });
+});
+
+describe("self-management tools over MCP", () => {
+  it("are offered to admins only, and a viewer's call is refused like an unknown tool", async () => {
+    const adminSid = await initSession("tok-admin");
+    const adminTools = await listTools("tok-admin", adminSid);
+    expect(adminTools).toContain("gw_status");
+    expect(adminTools).toContain("gw_set_tools_enabled");
+
+    const viewerSid = await initSession("tok-viewer");
+    const viewerTools = await listTools("tok-viewer", viewerSid);
+    expect(viewerTools.some((n) => n.startsWith("gw_"))).toBe(false);
+
+    // Hidden isn't enough — calling it anyway must fail at the boundary.
+    const denied = await rpc(
+      { jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "gw_status", arguments: {} } },
+      "tok-viewer",
+      viewerSid
+    );
+    expect(denied.json?.result?.isError).toBe(true);
+    expect(denied.json?.result?.content?.[0]?.text).toContain("not available");
+  });
+
+  it("an admin can inspect and change the catalog conversationally", async () => {
+    const sid = await initSession("tok-admin");
+    const status = await rpc(
+      { jsonrpc: "2.0", id: 10, method: "tools/call", params: { name: "gw_status", arguments: {} } },
+      "tok-admin",
+      sid
+    );
+    const reported = JSON.parse(status.json!.result!.content![0]!.text) as { toolCount: number };
+    expect(reported.toolCount).toBe(2); // read_thing + write_thing
+
+    const disabled = await rpc(
+      {
+        jsonrpc: "2.0",
+        id: 11,
+        method: "tools/call",
+        params: { name: "gw_set_tools_enabled", arguments: { upstreamId: "fake", tier: "write", enabled: false } },
+      },
+      "tok-admin",
+      sid
+    );
+    expect(disabled.json?.result?.content?.[0]?.text).toContain("Disabled 1 tool(s)");
+    expect(repo.toolSetting("fake", "write_thing")?.enabled).toBe(false);
+
+    // restore
+    await rpc(
+      {
+        jsonrpc: "2.0",
+        id: 12,
+        method: "tools/call",
+        params: { name: "gw_set_tools_enabled", arguments: { upstreamId: "fake", tier: "write", enabled: true } },
+      },
+      "tok-admin",
+      sid
+    );
   });
 });
 
