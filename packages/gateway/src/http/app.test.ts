@@ -363,6 +363,102 @@ describe("self-management tools over MCP", () => {
   });
 });
 
+describe("tools/list_changed notifications", () => {
+  const setPref = (body: unknown, token = "tok-viewer") =>
+    fetch(`${base}/api/me/prefs`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  /**
+   * Opens a fresh viewer session's SSE stream, runs `action`, and resolves true
+   * if a tools/list_changed notification arrives on that stream within the
+   * timeout. The stream is open before `action` runs, so the notification can't
+   * be missed — a false is a real absence, not a race. One session per call:
+   * the transport allows a single SSE stream per session and an aborted one
+   * isn't reaped instantly, so reuse would 409.
+   */
+  async function sawListChanged(action: () => Promise<unknown>): Promise<boolean> {
+    const sid = await initSession("tok-viewer");
+    const controller = new AbortController();
+    const response = await fetch(`${base}/mcp`, {
+      headers: {
+        Accept: "text/event-stream",
+        Authorization: "Bearer tok-viewer",
+        "mcp-session-id": sid,
+      },
+      signal: controller.signal,
+    });
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const timer = setTimeout(() => controller.abort(), 1500);
+    try {
+      await action();
+      while (!buffer.includes("notifications/tools/list_changed")) {
+        const { done, value } = await reader.read();
+        if (done) return false;
+        buffer += decoder.decode(value, { stream: true });
+      }
+      return true;
+    } catch {
+      return false; // aborted by the timer → nothing arrived
+    } finally {
+      clearTimeout(timer);
+      controller.abort();
+    }
+  }
+
+  it("fires when the user's OWN /me switch changes their list", async () => {
+    const sid = await initSession("tok-viewer");
+    expect(await listTools("tok-viewer", sid)).toEqual(["fake_read_thing"]);
+    try {
+      // The role envelope is untouched here — only this principal's prefs
+      // change — so a role-level fingerprint would skip the notification.
+      const notified = await sawListChanged(() =>
+        setPref({ upstreamId: "fake", toolName: "read_thing", enabled: false })
+      );
+      expect(notified).toBe(true);
+      expect(await listTools("tok-viewer", sid)).toEqual([]);
+    } finally {
+      await setPref({ upstreamId: "fake", toolName: "read_thing", enabled: true });
+    }
+  });
+
+  it("stays quiet when a write changes nothing the session can see", async () => {
+    try {
+      await setPref({ upstreamId: "fake", toolName: "read_thing", enabled: false });
+      // Same pref written twice: the visible list is already empty, so the
+      // diffing must swallow the second write instead of spamming clients.
+      const notified = await sawListChanged(() =>
+        setPref({ upstreamId: "fake", toolName: "read_thing", enabled: false })
+      );
+      expect(notified).toBe(false);
+    } finally {
+      await setPref({ upstreamId: "fake", toolName: "read_thing", enabled: true });
+    }
+  });
+
+  it("still fires for admin-side catalog changes, and only for affected sessions", async () => {
+    const patch = (body: unknown) =>
+      fetch(`${base}/api/catalog/fake`, {
+        method: "PATCH",
+        headers: { Authorization: "Bearer tok-admin", "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    try {
+      expect(await sawListChanged(() => patch({ enabled: false, tier: "read" }))).toBe(true);
+      // write_thing is outside the viewer's envelope → their list is unchanged
+      expect(await sawListChanged(() => patch({ enabled: false, tier: "write" }))).toBe(false);
+    } finally {
+      repo.upsertToolSetting({ upstreamId: "fake", toolName: "read_thing", enabled: true });
+      repo.upsertToolSetting({ upstreamId: "fake", toolName: "write_thing", enabled: true });
+    }
+  });
+});
+
 describe("bulk catalog toggle", () => {
   const bulk = (body: unknown, upstream = "fake") =>
     fetch(`${base}/api/catalog/${upstream}`, {

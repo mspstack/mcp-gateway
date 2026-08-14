@@ -353,9 +353,12 @@ export function createApp(deps: AppDeps): express.Express {
   const resolveAuth = createAuthResolver(deps);
   const sessions = new Map<string, SessionRecord>();
 
-  const visibleFingerprint = (roleId: number): string =>
+  // Per PRINCIPAL, not per role: a user's own /me switches change their list
+  // without touching the role envelope, so a role-level fingerprint would see
+  // no diff and skip the notification (the list itself is allowsFor-filtered).
+  const visibleFingerprint = (principal: Principal): string =>
     policy
-      .visibleEntries(roleId, manager.catalogEntries())
+      .visibleEntriesFor(principal, manager.catalogEntries())
       .map((entry) => entry.exposedName)
       .sort()
       .join("\n");
@@ -363,7 +366,7 @@ export function createApp(deps: AppDeps): express.Express {
   /** Re-check every live session's visible tools; notify only those that changed. */
   const broadcastVisibility = (): void => {
     for (const [id, session] of sessions) {
-      const fingerprint = visibleFingerprint(session.principal.roleId);
+      const fingerprint = visibleFingerprint(session.principal);
       if (fingerprint === session.visibleFingerprint) continue;
       session.visibleFingerprint = fingerprint;
       session.server.sendToolListChanged().catch((err) => {
@@ -479,7 +482,7 @@ export function createApp(deps: AppDeps): express.Express {
             transport,
             server,
             principal: auth.principal,
-            visibleFingerprint: visibleFingerprint(auth.principal.roleId),
+            visibleFingerprint: visibleFingerprint(auth.principal),
           });
           console.error(
             `[http] session ${newSessionId} created for ${auth.principal.label} (${auth.principal.roleName})`
