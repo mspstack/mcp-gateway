@@ -12,6 +12,8 @@
  */
 
 import type { CatalogEntry, Tier } from "./catalog.js";
+import { derivedGroupOf } from "./catalog.js";
+import { resolveCeiling, type CeilingReason, type SetMode } from "./toolsets.js";
 import type { Repo, RoleRow } from "../db/repo.js";
 import type { Principal } from "../auth/principal.js";
 import { prefsIdentity } from "../auth/principal.js";
@@ -41,6 +43,16 @@ export function toolAllowed(input: {
   return tierAllowed(input.maxTier, input.effectiveTier);
 }
 
+/** Everything behind one allow/deny — see PolicyService.explain. */
+export interface Decision {
+  allowed: boolean;
+  maxTier: MaxTier;
+  effectiveTier: Tier;
+  toolEnabled: boolean;
+  override: "allow" | "deny" | null;
+  reason: CeilingReason;
+}
+
 export class PolicyService {
   constructor(private readonly repo: Repo) {}
 
@@ -50,15 +62,62 @@ export class PolicyService {
 
   /** The single authorization decision, used by list filtering AND call-time checks. */
   allows(roleId: number, entry: CatalogEntry): boolean {
+    return this.explain(roleId, entry).allowed;
+  }
+
+  /**
+   * The decision plus every input that produced it — the same code path
+   * `allows` uses, so an explanation can never describe a different outcome
+   * than the boundary enforces. Powers the admin "why?" view and the /me hints.
+   */
+  explain(roleId: number, entry: CatalogEntry, mode: SetMode = "granted"): Decision {
     const role = this.repo.roleById(roleId);
-    if (!role) return false;
+    if (!role) {
+      return { allowed: false, maxTier: "none", effectiveTier: entry.tier, toolEnabled: true, override: null, reason: { kind: "closed-world" } };
+    }
     const setting = this.repo.toolSetting(entry.upstreamId, entry.upstreamToolName);
-    return toolAllowed({
-      toolEnabled: setting?.enabled ?? true,
-      effectiveTier: setting?.tierOverride ?? entry.tier,
-      maxTier: this.repo.grantFor(roleId, entry.upstreamId) ?? role.defaultMaxTier,
-      override: this.repo.overrideFor(roleId, entry.upstreamId, entry.upstreamToolName),
+    const effectiveTier = setting?.tierOverride ?? entry.tier;
+    const override = this.repo.overrideFor(roleId, entry.upstreamId, entry.upstreamToolName);
+
+    // Sets decide the ceiling when the role has any; otherwise the legacy
+    // grant/default path runs untouched, which is what keeps a set-less
+    // deployment byte-for-byte identical (#27).
+    const { maxTier, reason } = resolveCeiling({
+      facts: {
+        upstreamId: entry.upstreamId,
+        toolName: entry.upstreamToolName,
+        tier: effectiveTier,
+        group: setting?.groupLabel ?? derivedGroupOf(entry.tool) ?? "",
+      },
+      rules: this.repo.rulesForRole(roleId, mode),
+      // Self-service is additive on top of the granted world, so it is never
+      // "closed" on its own: with no self-service rules it simply offers nothing.
+      hasAnySet: mode === "granted" ? this.repo.roleHasSets(roleId) : true,
+      legacyGrant: this.repo.grantFor(roleId, entry.upstreamId),
+      roleDefault: role.defaultMaxTier,
     });
+
+    return {
+      allowed: toolAllowed({
+        toolEnabled: setting?.enabled ?? true,
+        effectiveTier,
+        maxTier,
+        override,
+      }),
+      maxTier,
+      effectiveTier,
+      toolEnabled: setting?.enabled ?? true,
+      override,
+      reason,
+    };
+  }
+
+  /**
+   * Would this tool be self-serviceable by the role — i.e. offered by a set
+   * assigned in `self-service` mode? Not live until the user opts in (#35).
+   */
+  selfServiceable(roleId: number, entry: CatalogEntry): boolean {
+    return this.explain(roleId, entry, "self-service").allowed;
   }
 
   visibleEntries(roleId: number, entries: Iterable<CatalogEntry>): CatalogEntry[] {
@@ -88,20 +147,29 @@ export class PolicyService {
    * Same function gates tools/list and tools/call, like the envelope itself.
    */
   allowsFor(principal: Principal, entry: CatalogEntry): boolean {
-    if (!this.allowsAny(principal.roles.map((r) => r.id), entry)) return false;
+    const roleIds = principal.roles.map((r) => r.id);
     const who = prefsIdentity(principal);
     const serverPref = this.repo.userPrefFor(who, entry.upstreamId, "");
     const toolPref = this.repo.userPrefFor(who, entry.upstreamId, entry.upstreamToolName);
-    // Off-by-default upstreams invert the personal layer: nothing is live until
-    // the user opts in (server-wide or per tool). The envelope check above is
-    // still the ceiling, so an opt-in can never widen beyond the role.
-    if (this.repo.getUpstream(entry.upstreamId)?.spec.userDefault === "off") {
-      if (serverPref === false || toolPref === false) return false;
-      return serverPref === true || toolPref === true;
+    const optedIn = serverPref === true || toolPref === true;
+    const denied = serverPref === false || toolPref === false;
+
+    if (this.allowsAny(roleIds, entry)) {
+      // Off-by-default upstreams invert the personal layer: nothing is live
+      // until the user opts in (server-wide or per tool). The envelope check
+      // above is still the ceiling, so an opt-in can never widen beyond it.
+      if (this.repo.getUpstream(entry.upstreamId)?.spec.userDefault === "off") {
+        return denied ? false : optedIn;
+      }
+      return !denied;
     }
-    if (serverPref === false) return false;
-    if (toolPref === false) return false;
-    return true;
+
+    // Self-service zone (#35): outside the granted envelope but offered by a
+    // set assigned in self-service mode. Never live by itself — an explicit
+    // opt-in row is what turns it on, and it is still capped by that set's own
+    // ceiling, so this cannot widen past what an admin wrote.
+    if (!optedIn || denied) return false;
+    return roleIds.some((roleId) => this.selfServiceable(roleId, entry));
   }
 
   visibleEntriesFor(principal: Principal, entries: Iterable<CatalogEntry>): CatalogEntry[] {

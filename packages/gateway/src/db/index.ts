@@ -207,4 +207,84 @@ export function migrate(db: DatabaseSync): void {
 
     db.exec("PRAGMA user_version = 5");
   }
+
+  if (version < 6) {
+    // Named tool sets (#27) + the self-service ceiling (#35).
+    //
+    // A set is a reusable list of rules; a role is assigned sets, each in one of
+    // two MODES: `granted` (live now) or `self-service` (the user may switch it
+    // on themselves). A role with no sets keeps today's behaviour exactly —
+    // legacy grant ?? role default — so this migration changes nothing until
+    // someone assigns the first set, which is what flips that role to a closed
+    // world.
+    //
+    // Selector semantics in tool_set_rules: NULL = "any", '' = the UNGROUPED
+    // bucket. They are different things, so the unique index COALESCEs to
+    // sentinels SQLite can actually compare (a plain UNIQUE treats NULLs as
+    // distinct and would allow duplicate selectors).
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS tool_sets (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        description TEXT,
+        scope TEXT NOT NULL DEFAULT 'shared' CHECK (scope IN ('shared','role')),
+        owner_role_id INTEGER REFERENCES roles(id) ON DELETE CASCADE,
+        source TEXT NOT NULL DEFAULT 'api' CHECK (source IN ('api','preset')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        CHECK ((scope = 'role') = (owner_role_id IS NOT NULL))
+      );
+
+      CREATE TABLE IF NOT EXISTS tool_set_rules (
+        id INTEGER PRIMARY KEY,
+        set_id INTEGER NOT NULL REFERENCES tool_sets(id) ON DELETE CASCADE,
+        upstream_id TEXT NOT NULL,
+        group_label TEXT,
+        tier TEXT CHECK (tier IS NULL OR tier IN ('read','write','destructive')),
+        tool_name TEXT,
+        max_tier TEXT NOT NULL CHECK (max_tier IN ('none','read','write','destructive'))
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_set_rules_selector ON tool_set_rules (
+        set_id, upstream_id,
+        COALESCE(group_label, char(1)),
+        COALESCE(tier, char(1)),
+        COALESCE(tool_name, char(1))
+      );
+
+      CREATE TABLE IF NOT EXISTS role_tool_sets (
+        role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+        set_id INTEGER NOT NULL REFERENCES tool_sets(id) ON DELETE CASCADE,
+        mode TEXT NOT NULL DEFAULT 'granted' CHECK (mode IN ('granted','self-service')),
+        assigned_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (role_id, set_id)
+      );
+
+      -- Inert until access requests ship (#29); here so there is one migration.
+      CREATE TABLE IF NOT EXISTS access_requests (
+        id INTEGER PRIMARY KEY,
+        principal TEXT NOT NULL,
+        requester_label TEXT,
+        role_id INTEGER REFERENCES roles(id) ON DELETE SET NULL,
+        upstream_id TEXT NOT NULL,
+        group_label TEXT,
+        tool_name TEXT,
+        requested_tier TEXT NOT NULL CHECK (requested_tier IN ('read','write','destructive')),
+        reason TEXT,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending','approved','denied','withdrawn','stale')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        decided_at TEXT,
+        decided_by TEXT,
+        decision_note TEXT,
+        applied_json TEXT
+      );
+      -- A re-click merges into the open request instead of duplicating it.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_access_requests_open ON access_requests (
+        principal, upstream_id,
+        COALESCE(group_label, char(1)),
+        COALESCE(tool_name, char(1))
+      ) WHERE status = 'pending';
+    `);
+
+    db.exec("PRAGMA user_version = 6");
+  }
 }

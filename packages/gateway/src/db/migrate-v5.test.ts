@@ -91,9 +91,11 @@ describe("migration v4 → v5", () => {
     expect(roleSource(db, "no-role")).toBeNull();
   });
 
-  it("reaches v5 on a fresh database too", () => {
+  it("carries a fresh database to the current schema version", () => {
     const db = new DatabaseSync(":memory:");
     migrate(db);
-    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(5);
+    // Bump with every new migration block — the assertion exists so adding one
+    // without thinking about the upgrade path fails here first.
+    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(6);
   });
 });
