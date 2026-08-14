@@ -39,6 +39,64 @@ Corollary that makes migration safe: **a role with no sets assigned behaves
 exactly as today** (legacy grant ?? role default). Assigning the first set flips
 that role to closed-world.
 
+## 2b. Two assignment modes: granted and self-service
+
+Requirement from the owner: *"нам нужна возможность включать и выключать тулы не
+только от админа но и от пользователя"* — resolved (2026-08-14) as a
+**self-service ceiling**, not free-for-all self-service. A user may switch things
+on themselves, but only inside bounds the admin drew.
+
+It needs no second vocabulary: a set is assigned to a role in one of two modes.
+
+- **`granted`** — live immediately. Exactly §2.
+- **`self-service`** — offered to the user, not live until they opt in. No
+  approval, no admin round-trip.
+
+Every tool then lands in one of five states for a principal, and `/me` renders
+each differently:
+
+| Zone | How it becomes live | `/me` shows |
+|---|---|---|
+| granted | already live | toggle (on) |
+| granted, user narrowed it | user's own deny row | toggle (off) |
+| **self-service** | user flips it on → opt-in row | toggle (off) + "available to you" |
+| requestable | admin approval (§6) | greyed + **Request** |
+| unavailable | `tool_settings.enabled = 0` | greyed, no button |
+
+**The user's half already exists.** The opt-in row type was built for
+`userDefault:"off"` upstreams and `Repo.bulkSetUserPrefs(…, optIn)` writes it, so
+a self-service switch is the same call the opt-in flow makes. Policy becomes:
+
+> live = (granted zone ∧ ¬user deny) ∨ (self-service zone ∧ user opt-in) ∨
+> (per-user grant from an approval, possibly time-boxed) — each capped by its own
+> rule's `max_tier`, all of it under the global kill switch.
+
+Concretely in `resolveMaxTier`: rules are partitioned by mode, and the ladder in
+§4 runs twice — once over granted rules (→ `maxTier`) and once over
+self-service rules (→ `selfServiceMaxTier`). `allows()` uses the first;
+`allowsFor()` additionally admits a tool inside the second when an opt-in row
+exists. Specificity/tie-breaks are unchanged and computed per partition, so a
+narrow self-service rule can't quietly raise the granted ceiling or vice versa.
+
+Design notes:
+
+- Expressed **per rule**, not as one extra tier per role, so "Identity read is
+  self-service, Endpoint is not" is sayable. Reuses the set editor, `explain`,
+  and the existing group/tier switches verbatim.
+- A self-service rule with `max_tier = destructive` lets a user hand themselves
+  LAPS passwords in one click. Allowed — the admin wrote it — but the UI demands
+  an explicit confirm and the default suggestion caps self-service at `write`.
+- `explain` reports the zone, so `/me` can answer "why can I switch this on?"
+  with "self-service via role techs-ro, set helpdesk-extras".
+- `gw_assign_tool_set` takes `mode`; `gw_explain_access` reports the zone.
+- Approving a request (§6) gains a third scope between "this person" and "the
+  whole role": **make it self-service for the role** — everyone may opt in,
+  nobody is opted in by default.
+- Prerequisite, now fixed on `fix/list-changed-per-principal`: the session
+  fingerprint was role-level, so a personal opt-in produced no
+  `tools/list_changed` and the tool stayed invisible until reconnect. Without
+  that, self-service looks broken the first time anyone uses it.
+
 ## 3. Schema — migration v5 (`src/db/index.ts`)
 
 Four tables in one migration block, following the existing
@@ -54,7 +112,9 @@ Four tables in one migration block, following the existing
   the existing vocabulary — `'none'` means excluded. Unique index over
   `(set_id, upstream_id, COALESCE(group_label,…), COALESCE(tier,…), COALESCE(tool_name,…))`
   so rules upsert by selector (SQLite treats NULLs as distinct in a plain UNIQUE).
-- `role_tool_sets(role_id, set_id, assigned_at)` PK(role_id, set_id).
+- `role_tool_sets(role_id, set_id, mode, assigned_at)` PK(role_id, set_id),
+  `mode TEXT NOT NULL DEFAULT 'granted' CHECK (mode IN ('granted','self-service'))`
+  — see §2b.
 - `access_requests(id, principal, requester_label, role_id, upstream_id,
   group_label, tool_name, requested_tier, reason, status, created_at, decided_at,
   decided_by, decision_note, applied_json)` with
@@ -287,6 +347,9 @@ the role default.
 3. Should `tool_overrides` be folded into tool-scoped rules (one mechanism, no
    "exclusion isn't absolute" wart) or kept as-is for an inert migration?
 
+Resolved: the scope of user-side enabling — a **self-service ceiling** per rule
+(§2b), decided 2026-08-14, not full self-service.
+
 ## Phasing
 
 - **Phase 0** — fix the `/me` group bulk switches for servers with derived
@@ -297,11 +360,18 @@ the role default.
   `PolicyService.explain` + `forPrincipal`. Zero behaviour change for roles
   without sets; existing policy tests must pass untouched.
 - **Phase 2** — admin surface for sets: endpoints, assignment dry-run diff,
-  convert-grants, explain, the Roles screen, `gw_set_override` /
+  convert-grants, explain, the Roles screen (incl. the mode chip and the
+  five-state preview of what a member sees), `gw_set_override` /
   `gw_explain_access` / set tools.
+- **Phase 2b** — self-service mode end to end (§2b): the `mode` partition in
+  `resolveMaxTier`, the zone in `explain`, `/me` rendering the
+  "available to you" state and writing opt-in rows. Lands with phase 2 in the
+  admin UI but is worth its own commit; it is what makes the role a ceiling
+  instead of a queue.
 - **Phase 3** — requests end to end: per-user time-boxed grants,
   `/api/me/catalog`, `/me` catalog + Request + My requests, admin Requests
-  panel, `gw_*` request tools, the §10.1 mitigations.
+  panel (incl. the "make it self-service for the role" approval scope), `gw_*`
+  request tools, the §10.1 mitigations.
 - **Phase 4** — preset-shipped sets, `docs/toolsets.md` for operators,
   CLAUDE.md / README / ui-guide updates, version bump + release.
 
