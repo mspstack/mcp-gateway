@@ -371,43 +371,67 @@ describe("tools/list_changed notifications", () => {
       body: JSON.stringify(body),
     });
 
+  interface Stream {
+    controller: AbortController;
+    reader: ReadableStreamDefaultReader<Uint8Array>;
+  }
+
   /**
-   * Opens a fresh viewer session's SSE stream, runs `action`, and resolves true
-   * if a tools/list_changed notification arrives on that stream within the
-   * timeout. The stream is open before `action` runs, so the notification can't
-   * be missed — a false is a real absence, not a race. One session per call:
-   * the transport allows a single SSE stream per session and an aborted one
-   * isn't reaped instantly, so reuse would 409.
+   * Opens the session's standalone GET (SSE) stream — the only channel a
+   * server-initiated notification can travel on. Retries on 409: the transport
+   * allows one stream per session and an aborted one isn't reaped instantly.
+   */
+  async function openStream(sid: string, lastEventId?: string): Promise<Stream> {
+    const controller = new AbortController();
+    for (let attempt = 0; ; attempt++) {
+      const response = await fetch(`${base}/mcp`, {
+        headers: {
+          Accept: "text/event-stream",
+          Authorization: "Bearer tok-viewer",
+          "mcp-session-id": sid,
+          ...(lastEventId ? { "Last-Event-ID": lastEventId } : {}),
+        },
+        signal: controller.signal,
+      });
+      if (response.status === 200) return { controller, reader: response.body!.getReader() };
+      expect(response.status).toBe(409);
+      if (attempt === 9) throw new Error("previous SSE stream never released");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+
+  /** Reads the stream until `needle` shows up; null if it doesn't in time. */
+  async function readUntil(stream: Stream, needle: string, ms = 1500): Promise<string | null> {
+    const timer = setTimeout(() => stream.controller.abort(), ms);
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      while (!buffer.includes(needle)) {
+        const { done, value } = await stream.reader.read();
+        if (done) return null;
+        buffer += decoder.decode(value, { stream: true });
+      }
+      return buffer;
+    } catch {
+      return null; // aborted by the timer → nothing arrived
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * True if `action` produced a tools/list_changed on a live stream. The stream
+   * is open before `action` runs, so a false is a real absence, not a race.
+   * A fresh session per call keeps the 409 retry loop out of the assertions.
    */
   async function sawListChanged(action: () => Promise<unknown>): Promise<boolean> {
     const sid = await initSession("tok-viewer");
-    const controller = new AbortController();
-    const response = await fetch(`${base}/mcp`, {
-      headers: {
-        Accept: "text/event-stream",
-        Authorization: "Bearer tok-viewer",
-        "mcp-session-id": sid,
-      },
-      signal: controller.signal,
-    });
-    expect(response.status).toBe(200);
-    const reader = response.body!.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    const timer = setTimeout(() => controller.abort(), 1500);
+    const stream = await openStream(sid);
     try {
       await action();
-      while (!buffer.includes("notifications/tools/list_changed")) {
-        const { done, value } = await reader.read();
-        if (done) return false;
-        buffer += decoder.decode(value, { stream: true });
-      }
-      return true;
-    } catch {
-      return false; // aborted by the timer → nothing arrived
+      return (await readUntil(stream, "notifications/tools/list_changed")) !== null;
     } finally {
-      clearTimeout(timer);
-      controller.abort();
+      stream.controller.abort();
     }
   }
 
@@ -436,6 +460,34 @@ describe("tools/list_changed notifications", () => {
         setPref({ upstreamId: "fake", toolName: "read_thing", enabled: false })
       );
       expect(notified).toBe(false);
+    } finally {
+      await setPref({ upstreamId: "fake", toolName: "read_thing", enabled: true });
+    }
+  });
+
+  it("buffers a notification sent while no stream is open and replays it on resume", async () => {
+    const sid = await initSession("tok-viewer");
+    const live = await openStream(sid);
+    try {
+      // 1. one delivered notification, to learn an event id to resume from
+      await setPref({ upstreamId: "fake", toolName: "read_thing", enabled: false });
+      const delivered = await readUntil(live, "notifications/tools/list_changed");
+      expect(delivered).not.toBeNull();
+      const eventId = /^id: *(.+)$/m.exec(delivered!)?.[1]?.trim();
+      expect(eventId).toBeTruthy();
+
+      // 2. the client goes away, and the list moves while it is gone — without
+      //    an event store this notification would be dropped on the floor
+      live.controller.abort();
+      await setPref({ upstreamId: "fake", toolName: "read_thing", enabled: true });
+
+      // 3. resuming with Last-Event-ID hands over what was missed
+      const resumed = await openStream(sid, eventId);
+      try {
+        expect(await readUntil(resumed, "notifications/tools/list_changed")).not.toBeNull();
+      } finally {
+        resumed.controller.abort();
+      }
     } finally {
       await setPref({ upstreamId: "fake", toolName: "read_thing", enabled: true });
     }

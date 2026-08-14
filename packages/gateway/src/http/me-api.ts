@@ -18,7 +18,7 @@
 import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import { prefsIdentity, principalSlug, type Principal } from "../auth/principal.js";
-import { derivedGroupOf } from "../domain/catalog.js";
+import { effectiveGroupOf, effectiveTierOf, resolveToolTargets } from "../domain/tool-targets.js";
 import type { AppDeps, AuthOutcome } from "./app.js";
 
 interface MeDeps {
@@ -76,14 +76,13 @@ export function createMeRouter(deps: AppDeps, me: MeDeps): Router {
       >();
       for (const entry of policy.visibleEntries(principal.roleId, manager.catalogEntries())) {
         const list = byUpstream.get(entry.upstreamId) ?? [];
-        const setting = repo.toolSetting(entry.upstreamId, entry.upstreamToolName);
         list.push({
           name: entry.upstreamToolName,
           exposedName: entry.exposedName,
-          // The effective tier is what the switches act on, overrides included.
-          tier: setting?.tierOverride ?? entry.tier,
-          /** Category for the group switches — explicit label, else derived. */
-          group: setting?.groupLabel ?? derivedGroupOf(entry.tool) ?? "",
+          // Tier and group come from the SAME helpers the bulk switches resolve
+          // targets with, so what the page groups by is what a click acts on.
+          tier: effectiveTierOf(repo, entry),
+          group: effectiveGroupOf(repo, entry),
           enabled: policy.allowsFor(principal, entry),
         });
         byUpstream.set(entry.upstreamId, list);
@@ -145,14 +144,15 @@ export function createMeRouter(deps: AppDeps, me: MeDeps): Router {
       }
 
       // Bulk: resolve the tools from the caller's OWN envelope, so one click
-      // can never touch something they were never allowed to see.
+      // can never touch something they were never allowed to see. Selector
+      // semantics live in domain/tool-targets so the group switches match on
+      // the DERIVED category too — matching on groupLabel alone resolved zero
+      // targets on exactly the servers groups were built for (cwpsa, cipp).
       if (body.tier || body.group !== undefined) {
-        const targets = envelope.filter((e) => {
-          if (e.upstreamId !== body.upstreamId) return false;
-          const setting = repo.toolSetting(e.upstreamId, e.upstreamToolName);
-          if (body.tier && (setting?.tierOverride ?? e.tier) !== body.tier) return false;
-          if (body.group !== undefined && (setting?.groupLabel ?? "") !== body.group) return false;
-          return true;
+        const targets = resolveToolTargets(repo, envelope, {
+          upstreamId: body.upstreamId,
+          ...(body.tier ? { tier: body.tier } : {}),
+          ...(body.group !== undefined ? { group: body.group } : {}),
         });
         // Opt-in upstreams need explicit enabled rows; for normal ones
         // "enable" just deletes the personal deny.

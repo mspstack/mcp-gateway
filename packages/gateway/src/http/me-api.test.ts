@@ -35,9 +35,12 @@ const upstreamSpec: UpstreamSpec = {
   },
 } as UpstreamSpec;
 
+// Descriptions carry a bracketed category and there are no admin group labels —
+// exactly the shape cwpsa and cipp have on prod, where the group switches used
+// to resolve zero targets.
 const tools: Tool[] = [
-  { name: "read_thing", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
-  { name: "write_thing", inputSchema: { type: "object" } },
+  { name: "read_thing", description: "[Docs] read it", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
+  { name: "write_thing", description: "[Docs] write it", inputSchema: { type: "object" } },
 ];
 
 const fakeLink: UpstreamLink = {
@@ -222,6 +225,45 @@ describe("/api/me", () => {
 
     // restore
     await me("PUT", "/prefs", "tok-editor", { upstreamId: "fake", tier: "write", enabled: true });
+  });
+
+  it("group switches match the DERIVED category, not only an explicit label", async () => {
+    // Regression: the bulk path filtered on `groupLabel ?? ""`, so every group
+    // click on a server without admin labels reported changed: 0 and did nothing.
+    const before = await me("GET", "/access", "tok-editor");
+    const listed = (before.json.servers as Array<{ tools: Array<{ name: string; group: string }> }>)[0]!.tools;
+    expect(listed.map((t) => t.group)).toEqual(["Docs", "Docs"]);
+
+    const hide = await me("PUT", "/prefs", "tok-editor", {
+      upstreamId: "fake",
+      group: "Docs",
+      enabled: false,
+    });
+    expect(hide.json).toMatchObject({ ok: true, changed: 2 });
+    const after = await me("GET", "/access", "tok-editor");
+    const hidden = (after.json.servers as Array<{ tools: Array<{ enabled: boolean }> }>)[0]!.tools;
+    expect(hidden.every((t) => !t.enabled)).toBe(true);
+
+    // tier and group together intersect
+    await me("PUT", "/prefs", "tok-editor", { upstreamId: "fake", group: "Docs", enabled: true });
+    const readsOnly = await me("PUT", "/prefs", "tok-editor", {
+      upstreamId: "fake",
+      group: "Docs",
+      tier: "read",
+      enabled: false,
+    });
+    expect(readsOnly.json).toMatchObject({ changed: 1 });
+
+    // a category nobody is in still matches nothing
+    const miss = await me("PUT", "/prefs", "tok-editor", {
+      upstreamId: "fake",
+      group: "Nope",
+      enabled: false,
+    });
+    expect(miss.json).toMatchObject({ changed: 0 });
+
+    // restore
+    await me("PUT", "/prefs", "tok-editor", { upstreamId: "fake", group: "Docs", enabled: true });
   });
 
   it("rejects prefs for tools outside the envelope (no widening, no junk)", async () => {

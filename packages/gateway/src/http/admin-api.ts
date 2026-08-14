@@ -12,6 +12,7 @@ import { z } from "zod";
 import { ConfigError, parseUpstreamSpec } from "../config.js";
 import { isMaxTier } from "../domain/policy.js";
 import { derivedGroupOf } from "../domain/catalog.js";
+import { resolveToolTargets } from "../domain/tool-targets.js";
 import { listSnapshots, runBackup } from "../db/backup.js";
 import { renderPreset, summarize } from "../domain/presets.js";
 import { UpstreamConnection } from "../upstream/connection.js";
@@ -225,11 +226,11 @@ export function createAdminRouter(deps: AppDeps, admin: AdminDeps): Router {
     "/catalog",
     h((_req, res) => {
       const settings = new Map(
-        repo.listToolSettings().map((s) => [`${s.upstreamId} ${s.toolName}`, s])
+        repo.listToolSettings().map((s) => [`${s.upstreamId}\u0000${s.toolName}`, s])
       );
       res.json(
         [...manager.catalogEntries()].map((entry) => {
-          const setting = settings.get(`${entry.upstreamId} ${entry.upstreamToolName}`);
+          const setting = settings.get(`${entry.upstreamId}\u0000${entry.upstreamToolName}`);
           return {
             upstreamId: entry.upstreamId,
             toolName: entry.upstreamToolName,
@@ -285,19 +286,13 @@ export function createAdminRouter(deps: AppDeps, admin: AdminDeps): Router {
         res.status(404).json({ error: `Unknown upstream "${upstreamId}" (or it has no tools)` });
         return;
       }
-      const targets = entries.filter((e) => {
-        const setting = repo.toolSetting(upstreamId, e.upstreamToolName);
-        // Match on the EFFECTIVE tier — an override is what the UI displays.
-        if (body.tier && (setting?.tierOverride ?? e.tier) !== body.tier) return false;
-        // An explicit label wins; otherwise fall back to the derived category
-        // so bulk-by-group works for servers that never got labels (CIPP).
-        if (
-          body.group !== undefined &&
-          (setting?.groupLabel ?? derivedGroupOf(e.tool) ?? "") !== body.group
-        ) {
-          return false;
-        }
-        return true;
+      // Effective tier (override wins) and effective group (explicit label,
+      // else the derived category) — one shared implementation, so this and the
+      // /me switches can't drift apart.
+      const targets = resolveToolTargets(repo, entries, {
+        upstreamId,
+        ...(body.tier ? { tier: body.tier } : {}),
+        ...(body.group !== undefined ? { group: body.group } : {}),
       });
       const changed = repo.bulkSetToolEnabled(
         upstreamId,
