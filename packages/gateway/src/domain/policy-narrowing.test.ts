@@ -149,6 +149,40 @@ describe("personal narrowing (allowsFor = envelope ∧ prefs)", () => {
   });
 });
 
+describe("denialReason (only self-inflicted denials are nameable)", () => {
+  it("separates the caller's own layer from everything else", () => {
+    const { repo, policy, editor } = setup();
+    const read = entry("get_doc", "read");
+    const destroy = entry("delete_doc", "destructive");
+
+    expect(policy.denialReason(editor, read)).toBe("allowed");
+
+    // above the role's ceiling — must stay indistinguishable from unknown
+    expect(policy.denialReason(editor, destroy)).toBe("envelope");
+
+    // the user's own off-switch
+    repo.bulkSetUserPrefs(prefsIdentity(editor), "up1", ["get_doc"], false, false);
+    expect(policy.denialReason(editor, read)).toBe("personal");
+
+    // an admin kill switch is not the user's business, even on their own tool
+    repo.upsertToolSetting({ upstreamId: "up1", toolName: "get_doc", enabled: false });
+    expect(policy.denialReason(editor, read)).toBe("envelope");
+  });
+
+  it("reports an opt-in server as not-yet-enabled rather than switched off", () => {
+    const { repo, policy, editor } = setup();
+    repo.upsertUpstream(
+      { id: "up1", namespace: "up1", transport: "http", url: "http://unused/mcp", headers: {}, enabled: true, userDefault: "off" },
+      "api"
+    );
+    const read = entry("get_doc", "read");
+    expect(policy.denialReason(editor, read)).toBe("optIn");
+
+    repo.bulkSetUserPrefs(prefsIdentity(editor), "up1", ["get_doc"], true, true);
+    expect(policy.denialReason(editor, read)).toBe("allowed");
+  });
+});
+
 describe("principalSlug", () => {
   it("passes Entra OIDs through recognizably", () => {
     const p: Principal = {

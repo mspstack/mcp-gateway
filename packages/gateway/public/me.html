@@ -176,7 +176,8 @@ async function renderAccess() {
 
   el.innerHTML = `<section class="panel"><h2>My access</h2>
     <p class="muted">Turn servers, whole tiers, or individual tools off for your own sessions. You can only narrow what your role already grants — turning something on just removes your personal off-switch.</p>
-    <p class="muted" style="border-left:2px solid var(--accent); padding-left:10px">Changes take effect immediately: a tool you switched off is refused even if your client still lists it. The <em>list</em> your client shows is fetched when it connects — if a change doesn't appear there, reconnect the MCP client (or start a new chat) and it will pick up the current set.</p>
+    <p class="muted" style="border-left:2px solid var(--accent); padding-left:10px">Changes take effect immediately: a tool you switched off is refused even if your client still lists it. The <em>list</em> your client shows is fetched when it connects — if a change doesn't appear there, use <b>Apply now</b> and your clients will reconnect and pick up the current set.
+      <button class="btn" id="reload-sessions" style="margin-left:8px">Apply now</button></p>
     ${data.servers.map(s => {
       const counts = tierCounts(s.tools);
       const optIn = s.userDefault === "off";
@@ -272,6 +273,19 @@ async function renderAccess() {
       toast(`${body.enabled ? "Enabled" : "Hidden"} ${r.changed} ${what}${r.changed === 1 ? "" : "s"}`);
       renderAccess();
     } catch (e) { toast(e.message, true); }
+  };
+
+  // Dropping my sessions makes every client of mine re-initialize, which is the
+  // only way to shake loose a cached tool list. Mine only — never anyone else's.
+  $("#reload-sessions").onclick = async (ev) => {
+    const b = ev.target; b.disabled = true;
+    try {
+      const r = await api("/sessions/reload", { method: "POST" });
+      toast(r.closed
+        ? `Reconnecting ${r.closed} session${r.closed === 1 ? "" : "s"} — your client will re-read its tools`
+        : "No live sessions to reconnect — your client will read the current set when it connects");
+    } catch (e) { toast(e.message, true); }
+    finally { b.disabled = false; }
   };
 
   el.onchange = async (ev) => {

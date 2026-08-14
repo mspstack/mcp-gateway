@@ -392,6 +392,36 @@ export function createApp(deps: AppDeps): express.Express {
   };
   manager.onCatalogChanged = broadcastVisibility;
 
+  /**
+   * Close live MCP sessions so their clients have to `initialize` again — the
+   * only way to make a client that caches its tool list re-read it. `match`
+   * decides whose: /me passes its own caller, admins can target a principal.
+   * Deliberately manual: an in-flight tools/call on a dropped session fails, so
+   * this can't be a side effect of every pref change.
+   */
+  const reloadSessions = (match: (session: SessionRecord, sessionId: string) => boolean): number => {
+    let closed = 0;
+    for (const [id, session] of [...sessions]) {
+      if (!match(session, id)) continue;
+      sessions.delete(id);
+      closed += 1;
+      console.error(`[http] session ${id} (${session.principal.label}) closed on request — client must re-initialize`);
+      // Errors here mean the transport is already gone, which is the goal.
+      void session.transport.close().catch(() => {});
+    }
+    return closed;
+  };
+
+  const sessionSummaries = (): Array<Record<string, unknown>> =>
+    [...sessions].map(([id, session]) => ({
+      sessionId: id,
+      principal: prefsIdentity(session.principal),
+      label: session.principal.label,
+      role: session.principal.roleName,
+      streamOpen: session.streamOpen,
+      toolCount: session.visibleFingerprint === "" ? 0 : session.visibleFingerprint.split("\n").length,
+    }));
+
   const attachWwwAuthenticate = (res: Response): void => {
     if (deps.oidcVerifier) res.set("WWW-Authenticate", wwwAuthenticate(config.publicUrl));
   };
@@ -489,7 +519,8 @@ export function createApp(deps: AppDeps): express.Express {
               ...(deps.backupUploader ? { backupUploader: deps.backupUploader } : {}),
               onPolicyChanged: broadcastVisibility,
             }
-          : undefined
+          : undefined,
+        `${config.publicUrl.replace(/\/+$/, "")}/me`
       );
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
@@ -559,14 +590,23 @@ export function createApp(deps: AppDeps): express.Express {
 
   app.use(
     "/api/me",
-    createMeRouter(deps, { resolveAuth, onPolicyChanged: broadcastVisibility })
+    createMeRouter(deps, {
+      resolveAuth,
+      onPolicyChanged: broadcastVisibility,
+      reloadSessions,
+    })
   );
 
   // ── Admin API + UI ───────────────────────────────────────────
 
   app.use(
     "/api",
-    createAdminRouter(deps, { resolveAuth, onPolicyChanged: broadcastVisibility })
+    createAdminRouter(deps, {
+      resolveAuth,
+      onPolicyChanged: broadcastVisibility,
+      reloadSessions,
+      sessionSummaries,
+    })
   );
 
   // ── Interactive login (cookie + PKCE) ───────────────────────

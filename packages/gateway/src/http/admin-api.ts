@@ -17,6 +17,7 @@ import { listSnapshots, runBackup } from "../db/backup.js";
 import { renderPreset, summarize } from "../domain/presets.js";
 import { UpstreamConnection } from "../upstream/connection.js";
 import { SERVER_VERSION } from "../mcp/gateway-server.js";
+import { prefsIdentity, type Principal } from "../auth/principal.js";
 import type { AppDeps, AuthOutcome } from "./app.js";
 
 const REGISTRY_URL = "https://registry.modelcontextprotocol.io/v0/servers";
@@ -26,6 +27,10 @@ const PREFLIGHT_TIMEOUT_MS = 45_000;
 interface AdminDeps {
   resolveAuth: (req: Request) => Promise<AuthOutcome>;
   onPolicyChanged: () => void;
+  /** Close matching live MCP sessions; returns how many were dropped. */
+  reloadSessions: (match: (session: { principal: Principal }, sessionId: string) => boolean) => number;
+  /** Live sessions for the support view (no secrets, identity + stream state). */
+  sessionSummaries: () => Array<Record<string, unknown>>;
 }
 
 const tierSchema = z.enum(["read", "write", "destructive"]);
@@ -78,6 +83,42 @@ export function createAdminRouter(deps: AppDeps, admin: AdminDeps): Router {
         oidc: deps.config.oidc ? { issuer: deps.config.oidc.issuer } : null,
         staticTokens: deps.config.staticTokens.map((t) => ({ label: t.label, role: t.roleName })),
       });
+    })
+  );
+
+  // ── live MCP sessions (support: "their client is stuck on an old list") ──
+
+  router.get(
+    "/sessions",
+    h((_req, res) => {
+      res.json(admin.sessionSummaries());
+    })
+  );
+
+  /**
+   * Drop sessions so their clients must re-initialize and re-read tools/list.
+   * Target one session or every session of one principal — never everything by
+   * accident, and an in-flight call on a dropped session fails, so this is a
+   * deliberate support action.
+   */
+  router.post(
+    "/sessions/reload",
+    h((req, res) => {
+      const parsed = z
+        .object({ sessionId: z.string().min(1).optional(), principal: z.string().min(1).optional() })
+        .refine((b) => Boolean(b.sessionId) !== Boolean(b.principal), {
+          message: "Pass exactly one of sessionId or principal",
+        })
+        .safeParse(req.body ?? {});
+      if (!parsed.success) {
+        res.status(400).json({ error: "Pass exactly one of sessionId or principal" });
+        return;
+      }
+      const body = parsed.data;
+      const closed = body.sessionId
+        ? admin.reloadSessions((_session, id) => id === body.sessionId)
+        : admin.reloadSessions((session) => prefsIdentity(session.principal) === body.principal);
+      res.json({ ok: true, closed });
     })
   );
 

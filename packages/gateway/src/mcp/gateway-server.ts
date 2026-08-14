@@ -30,7 +30,9 @@ export function createGatewayServer(
   principal: Principal,
   personalCredsFor?: PersonalCredsLookup,
   /** Admin-only self-management tools; omit to serve federated tools only. */
-  selfTools?: SelfToolDeps
+  selfTools?: SelfToolDeps,
+  /** Public /me URL, so a self-inflicted denial can point at the switch. */
+  meUrl?: string
 ): Server {
   const server = new Server(
     { name: SERVER_NAME, version: SERVER_VERSION },
@@ -64,16 +66,19 @@ export function createGatewayServer(
     }
     const entry = manager.entryFor(request.params.name);
     if (!entry || !policy.allowsFor(principal, entry)) {
-      // Same response for unknown and forbidden — no tool-existence oracle.
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text" as const,
-            text: `Tool "${request.params.name}" is not available to this session — it may not exist, be disabled, or require a higher role than "${principal.roleName}".`,
-          },
-        ],
-      };
+      // A tool the caller closed themselves is already listed on their own /me
+      // page, so saying so leaks nothing — and saves them asking an admin about
+      // their own switch. Every other case keeps the no-oracle wording: unknown,
+      // globally disabled and role-denied tools stay indistinguishable.
+      const reason = entry ? policy.denialReason(principal, entry) : "envelope";
+      const where = meUrl ? ` (${meUrl})` : "";
+      const text =
+        reason === "personal"
+          ? `Tool "${request.params.name}" is switched off in your personal settings — turn it back on from your MCP access page${where}, then reconnect this client.`
+          : reason === "optIn"
+            ? `Tool "${request.params.name}" is available to you but not enabled yet — this server is off by default, so enable what you need on your MCP access page${where}, then reconnect this client.`
+            : `Tool "${request.params.name}" is not available to this session — it may not exist, be disabled, or require a higher role than "${principal.roleName}".`;
+      return { isError: true, content: [{ type: "text" as const, text }] };
     }
     const args = request.params.arguments ?? {};
 
