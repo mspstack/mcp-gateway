@@ -583,6 +583,21 @@ describe("session reload", () => {
     expect(await listFederated("tok-admin", theirs)).toContain("fake_read_thing");
   });
 
+  it("shows me my own clients and whether they can be notified at all", async () => {
+    const sid = await initSession("tok-viewer");
+    await initSession("tok-admin"); // someone else's, must not appear
+
+    const mine = (await (
+      await fetch(`${base}/api/me/sessions`, { headers: { Authorization: "Bearer tok-viewer" } })
+    ).json()) as { sessions: Array<{ sessionId: string; streamOpen: boolean }>; notificationStream: boolean };
+
+    expect(mine.sessions.map((s) => s.sessionId)).toContain(sid);
+    expect(mine.sessions.every((s) => s.streamOpen === false)).toBe(true);
+    // No GET stream anywhere → the gateway cannot push list_changed at all,
+    // which is what makes "Apply now" the only cure. Say so, don't imply it.
+    expect(mine.notificationStream).toBe(false);
+  });
+
   it("is admin-only on /api/sessions, and targets one session or one principal", async () => {
     const sid = await initSession("tok-viewer");
 

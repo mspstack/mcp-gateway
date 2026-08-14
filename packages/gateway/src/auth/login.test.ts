@@ -202,8 +202,11 @@ describe("interactive login callback → cookie session", () => {
     const session = cookieFrom(cb, "mspstack_session");
     expect(session).toBeTruthy();
 
-    // The role was persisted at callback time.
-    expect(repo.userBySubject(ISS, "oid-editor")?.roleId).toBe(editorRoleId);
+    // The group-derived roles were persisted at callback time — as login roles,
+    // NOT as an explicit override, so an admin's own choice stays theirs (#28).
+    const user = repo.userBySubject(ISS, "oid-editor")!;
+    expect(user.roleId).toBeNull();
+    expect(repo.loginRoles(user.id).map((r) => r.id)).toEqual([editorRoleId]);
 
     // The session cookie now authenticates /api/me (no bearer token at all).
     const access = await fetch(`${base}/api/me/access`, { headers: { Cookie: session! } });

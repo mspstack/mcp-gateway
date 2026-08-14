@@ -102,6 +102,10 @@ export interface UserCredentialRow {
   updatedAt: string;
 }
 
+/** Ordering helper: "most privileged first" for role lists. */
+const TIER_RANK_SQL = `CASE r.default_max_tier
+  WHEN 'destructive' THEN 3 WHEN 'write' THEN 2 WHEN 'read' THEN 1 ELSE 0 END`;
+
 export class Repo {
   constructor(private readonly db: DatabaseSync) {}
 
@@ -423,9 +427,46 @@ export class Repo {
     ).map(mapUser);
   }
 
+  /** Admin/bootstrap override — REPLACES whatever the user's groups map to. */
   setUserRole(userId: number, roleId: number | null): boolean {
-    const result = this.db.prepare("UPDATE users SET role_id = ? WHERE id = ?").run(roleId, userId);
+    const result = this.db
+      .prepare("UPDATE users SET role_id = ?, role_source = ? WHERE id = ?")
+      .run(roleId, roleId === null ? null : "admin", userId);
     return result.changes > 0;
+  }
+
+  /**
+   * Remember every role the login's group claims mapped to. Group claims only
+   * arrive with a fresh IdP token, so the cookie/JWT paths (which see no groups)
+   * read these rows back instead of re-deriving. Replace-all in one transaction:
+   * losing a group must remove its role, not accumulate forever.
+   */
+  setLoginRoles(userId: number, roleIds: number[]): void {
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare("DELETE FROM user_login_roles WHERE user_id = ?").run(userId);
+      const insert = this.db.prepare(
+        "INSERT OR IGNORE INTO user_login_roles (user_id, role_id) VALUES (?, ?)"
+      );
+      for (const roleId of roleIds) insert.run(userId, roleId);
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
+  loginRoles(userId: number): RoleRow[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT r.id, r.name, r.default_max_tier, r.is_admin, r.protected
+           FROM user_login_roles ulr JOIN roles r ON r.id = ulr.role_id
+           WHERE ulr.user_id = ?
+           ORDER BY r.is_admin DESC, ${TIER_RANK_SQL} DESC, r.id`
+        )
+        .all(userId) as Array<Record<string, unknown>>
+    ).map(mapRole);
   }
 
   // ── group mappings ──
@@ -454,25 +495,41 @@ export class Repo {
     return this.db.prepare("DELETE FROM group_mappings WHERE id = ?").run(id).changes > 0;
   }
 
-  /** Resolve the role for an OIDC login: user override > group mapping (highest tier wins). */
-  resolveOidcRole(iss: string, sub: string, groups: string[]): RoleRow | null {
+  /**
+   * Every role an OIDC principal holds — the envelope is their UNION, so being
+   * added to a group can only widen access (issue #28). Order is
+   * "most privileged first" so callers can take [0] as the primary for display.
+   *
+   * - an explicit `users.role_id` override REPLACES group-derived roles (that is
+   *   the point of an override);
+   * - otherwise every mapped group counts, not just the highest;
+   * - with no groups in hand (cookie / gateway-JWT paths) the roles remembered
+   *   at the last real login are used.
+   */
+  resolveOidcRoles(iss: string, sub: string, groups: string[]): RoleRow[] {
     const user = this.userBySubject(iss, sub);
-    if (user?.roleId != null) return this.roleById(user.roleId);
-    if (groups.length === 0) return null;
+    if (user?.roleId != null) {
+      const role = this.roleById(user.roleId);
+      return role ? [role] : [];
+    }
+    if (groups.length === 0) return user ? this.loginRoles(user.id) : [];
+    return this.rolesForGroups(iss, groups);
+  }
+
+  /** Roles mapped from group claims, most privileged first. Override-blind. */
+  rolesForGroups(iss: string, groups: string[]): RoleRow[] {
+    if (groups.length === 0) return [];
     const placeholders = groups.map(() => "?").join(",");
-    const row = this.db
-      .prepare(
-        `SELECT r.id, r.name, r.default_max_tier, r.is_admin, r.protected
-         FROM group_mappings gm JOIN roles r ON r.id = gm.role_id
-         WHERE gm.iss = ? AND gm.claim_value IN (${placeholders})
-         ORDER BY r.is_admin DESC,
-           CASE r.default_max_tier
-             WHEN 'destructive' THEN 3 WHEN 'write' THEN 2 WHEN 'read' THEN 1 ELSE 0
-           END DESC
-         LIMIT 1`
-      )
-      .get(iss, ...groups) as Record<string, unknown> | undefined;
-    return row ? mapRole(row) : null;
+    return (
+      this.db
+        .prepare(
+          `SELECT DISTINCT r.id, r.name, r.default_max_tier, r.is_admin, r.protected
+           FROM group_mappings gm JOIN roles r ON r.id = gm.role_id
+           WHERE gm.iss = ? AND gm.claim_value IN (${placeholders})
+           ORDER BY r.is_admin DESC, ${TIER_RANK_SQL} DESC, r.id`
+        )
+        .all(iss, ...groups) as Array<Record<string, unknown>>
+    ).map(mapRole);
   }
 
   // ── user prefs (personal narrowing — slice 3) ──

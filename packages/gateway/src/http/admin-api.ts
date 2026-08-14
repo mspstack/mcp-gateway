@@ -506,7 +506,20 @@ export function createAdminRouter(deps: AppDeps, admin: AdminDeps): Router {
   router.get(
     "/users",
     h((_req, res) => {
-      res.json(repo.listUsers());
+      // roleId is the ADMIN override; loginRoles are what the user's groups
+      // mapped to at their last login. Effective access is the union of
+      // whichever applies (#28), so show both rather than one "role" column.
+      res.json(
+        repo.listUsers().map((user) => {
+          const loginRoles = repo.loginRoles(user.id).map((r) => r.name);
+          const override = user.roleId != null ? repo.roleById(user.roleId)?.name ?? null : null;
+          return {
+            ...user,
+            loginRoles,
+            effectiveRoles: override ? [override] : loginRoles,
+          };
+        })
+      );
     })
   );
 

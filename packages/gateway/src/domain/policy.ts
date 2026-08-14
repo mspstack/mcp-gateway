@@ -66,13 +66,29 @@ export class PolicyService {
   }
 
   /**
+   * The envelope of a principal holding several roles: the UNION (issue #28).
+   * Each role is evaluated on its own — its grant, its default tier, its own
+   * per-tool overrides — so a `deny` override closes that role's path and not
+   * the others'. Subtracting for everyone is what the kill switch is for.
+   */
+  allowsAny(roleIds: readonly number[], entry: CatalogEntry): boolean {
+    return roleIds.some((roleId) => this.allows(roleId, entry));
+  }
+
+  /** Envelope of every role the principal holds (no personal prefs applied). */
+  envelopeFor(principal: Principal, entries: Iterable<CatalogEntry>): CatalogEntry[] {
+    const roleIds = principal.roles.map((r) => r.id);
+    return [...entries].filter((entry) => this.allowsAny(roleIds, entry));
+  }
+
+  /**
    * Personal narrowing (slice 3): effective = admin envelope ∧ user prefs.
    * Prefs are deny-only rows (an upstream-wide '' row or a per-tool row), so
    * this can only ever REMOVE access relative to allows() — never widen it.
    * Same function gates tools/list and tools/call, like the envelope itself.
    */
   allowsFor(principal: Principal, entry: CatalogEntry): boolean {
-    if (!this.allows(principal.roleId, entry)) return false;
+    if (!this.allowsAny(principal.roles.map((r) => r.id), entry)) return false;
     const who = prefsIdentity(principal);
     const serverPref = this.repo.userPrefFor(who, entry.upstreamId, "");
     const toolPref = this.repo.userPrefFor(who, entry.upstreamId, entry.upstreamToolName);
@@ -100,7 +116,7 @@ export class PolicyService {
    * else stays `"envelope"` and keeps the no-oracle wording.
    */
   denialReason(principal: Principal, entry: CatalogEntry): "allowed" | "envelope" | "personal" | "optIn" {
-    if (!this.allows(principal.roleId, entry)) return "envelope";
+    if (!this.allowsAny(principal.roles.map((r) => r.id), entry)) return "envelope";
     if (this.allowsFor(principal, entry)) return "allowed";
     return this.repo.getUpstream(entry.upstreamId)?.spec.userDefault === "off" ? "optIn" : "personal";
   }

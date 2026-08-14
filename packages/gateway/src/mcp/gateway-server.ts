@@ -41,16 +41,20 @@ export function createGatewayServer(
 
   // Envelope ∧ personal prefs — the same allowsFor gates list AND call, so
   // a user's own narrowing is enforced at the boundary, not just hidden in UX.
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const tools = [
       // Self-management is offered to admins only; for everyone else these
       // names simply don't exist (the call handler re-checks anyway).
       ...(selfTools && principal.isAdmin ? SELF_TOOLS : []),
       ...policy
         .visibleEntriesFor(principal, manager.catalogEntries())
         .map((entry) => ({ ...entry.tool, name: entry.exposedName })),
-    ],
-  }));
+    ];
+    // Logged because "did the client ever re-read the list?" was otherwise
+    // unanswerable, and that question cost a whole afternoon once.
+    console.error(`[mcp] ${principal.label} tools/list -> ${tools.length} tool(s)`);
+    return { tools };
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // The `gw` namespace is reserved (config.ts refuses it for upstreams), so
@@ -71,6 +75,10 @@ export function createGatewayServer(
       // their own switch. Every other case keeps the no-oracle wording: unknown,
       // globally disabled and role-denied tools stay indistinguishable.
       const reason = entry ? policy.denialReason(principal, entry) : "envelope";
+      // Names and decisions only — never arguments, which carry customer data.
+      console.error(
+        `[mcp] ${principal.label} tools/call ${request.params.name} -> denied (${entry ? reason : "unknown"})`
+      );
       const where = meUrl ? ` (${meUrl})` : "";
       const text =
         reason === "personal"
@@ -81,6 +89,7 @@ export function createGatewayServer(
       return { isError: true, content: [{ type: "text" as const, text }] };
     }
     const args = request.params.arguments ?? {};
+    console.error(`[mcp] ${principal.label} tools/call ${request.params.name} -> allowed`);
 
     // sessionMode:"per-user" — route the call over the caller's own
     // connection, with their registered credential refs layered onto the

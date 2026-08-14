@@ -111,6 +111,10 @@ describe("read-only tools", () => {
     const status = parsed(await callSelfTool(deps, admin, "gw_status", {}));
     expect(status.toolCount).toBe(3);
     expect((status.upstreams as Array<{ id: string }>).map((u) => u.id)).toEqual(["fake"]);
+    // version is the release, mode is standalone/integrated — the field used to
+    // carry the mode, so gw_status claimed to be running version "integrated"
+    expect(status.version).toMatch(/^\d+\.\d+\.\d+/);
+    expect(status.mode).toBe("standalone");
   });
 
   it("gw_list_servers redacts literal credential values but shows refs", async () => {
