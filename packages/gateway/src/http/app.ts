@@ -68,6 +68,7 @@ import {
   verifyAccessToken,
 } from "../auth/authz-server.js";
 import { createGatewayServer, SERVER_NAME, SERVER_VERSION } from "../mcp/gateway-server.js";
+import { ReplayEventStore } from "./event-store.js";
 import { createAdminRouter } from "./admin-api.js";
 import { createMeRouter } from "./me-api.js";
 
@@ -105,6 +106,13 @@ interface SessionRecord {
   server: Server;
   principal: Principal;
   visibleFingerprint: string;
+  /**
+   * Whether the client holds the standalone GET (SSE) stream. Server-initiated
+   * messages can only travel on it, and the SDK drops them silently when it is
+   * closed, so this is the difference between "notified" and "buffered for
+   * replay" — worth logging, since it is otherwise unobservable.
+   */
+  streamOpen: boolean;
 }
 
 function rpcError(res: Response, status: number, code: number, message: string): void {
@@ -369,6 +377,14 @@ export function createApp(deps: AppDeps): express.Express {
       const fingerprint = visibleFingerprint(session.principal);
       if (fingerprint === session.visibleFingerprint) continue;
       session.visibleFingerprint = fingerprint;
+      if (!session.streamOpen) {
+        // Not an error: the event store keeps it for a resuming client. Logged
+        // because "the client never saw it" looks identical to a policy bug
+        // from the outside.
+        console.error(
+          `[http] session ${id} (${session.principal.label}) has no open stream — list_changed buffered for replay`
+        );
+      }
       session.server.sendToolListChanged().catch((err) => {
         console.error(`[http] list_changed notify failed for session ${id}: ${String(err)}`);
       });
@@ -477,12 +493,17 @@ export function createApp(deps: AppDeps): express.Express {
       );
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
+        // Per-session replay window: a list_changed emitted while the client's
+        // GET stream is closed is buffered instead of lost, and delivered when
+        // the client resumes with Last-Event-ID.
+        eventStore: new ReplayEventStore(),
         onsessioninitialized: (newSessionId) => {
           sessions.set(newSessionId, {
             transport,
             server,
             principal: auth.principal,
             visibleFingerprint: visibleFingerprint(auth.principal),
+            streamOpen: false,
           });
           console.error(
             `[http] session ${newSessionId} created for ${auth.principal.label} (${auth.principal.roleName})`
@@ -513,6 +534,14 @@ export function createApp(deps: AppDeps): express.Express {
       if (!session) return rpcError(res, 404, -32000, "Session not found");
       if (principalKey(session.principal) !== principalKey(auth.principal)) {
         return rpcError(res, 403, -32003, "Forbidden: credentials do not match this session");
+      }
+      // A GET is the client opening its notification stream; track it so
+      // broadcastVisibility can say whether a notification went out live.
+      if (req.method === "GET") {
+        session.streamOpen = true;
+        res.on("close", () => {
+          session.streamOpen = false;
+        });
       }
       await session.transport.handleRequest(req, res);
     })().catch((err) => {

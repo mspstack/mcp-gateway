@@ -176,6 +176,7 @@ async function renderAccess() {
 
   el.innerHTML = `<section class="panel"><h2>My access</h2>
     <p class="muted">Turn servers, whole tiers, or individual tools off for your own sessions. You can only narrow what your role already grants — turning something on just removes your personal off-switch.</p>
+    <p class="muted" style="border-left:2px solid var(--accent); padding-left:10px">Changes take effect immediately: a tool you switched off is refused even if your client still lists it. The <em>list</em> your client shows is fetched when it connects — if a change doesn't appear there, reconnect the MCP client (or start a new chat) and it will pick up the current set.</p>
     ${data.servers.map(s => {
       const counts = tierCounts(s.tools);
       const optIn = s.userDefault === "off";
