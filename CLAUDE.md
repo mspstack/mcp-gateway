@@ -56,4 +56,14 @@ clients start sending URL-shaped client ids.
 
 Also: resources/prompts federation · npm pre-install pool.
 
+**Named tool sets for roles + access requests — PLANNED** (self-contained plan:
+`docs/plans/tool-sets-and-access-requests.md`): roles get reusable named sets of
+(server, category, tier) rules instead of only per-upstream ceilings; a role with
+no sets keeps today's behaviour byte-for-byte, the first assigned set flips it to
+closed-world. Includes additive roles (today `resolveOidcRole` picks ONE role for
+a user in several mapped groups — with sets that silently drops the other role's
+surface, so it lands first), a full-catalog `/me` with Request buttons, and
+per-user time-boxed grants so approving one person's request does not widen the
+whole role.
+
 **MSPStack integrated mode** — the gateway runs as a native MSPStack app. SHIPPED: `secrets/keyvault.ts` (`kv:<name>` refs), `GATEWAY_MODE=standalone|integrated` (integrated demands KEY_VAULT_URI + OIDC; standalone is byte-for-byte the old behavior), `/api/me/*` self-service (narrow-only prefs enforced in PolicyService at list AND call; personal creds → secret store, refs only), and `sessionMode:"per-user"` upstream sessions consuming those creds. REMAINING: the Toolbox "My MCP Access" app (MSPStack repo; gated on an Entra app registration for the gateway audience). Design plan: hub repo (private, github.com/mspstack/hub) `docs/plans/gateway-integrated-mode.md`.
