@@ -636,13 +636,16 @@ async function renderUsers() {
   el.innerHTML = `
     <section class="panel"><h2>Users (OIDC logins)</h2>
       ${users.length ? `<table>
-        <tr><th>User</th><th>Subject</th><th>Last login</th><th>Role</th></tr>
+        <tr><th>User</th><th>Subject</th><th>Last login</th><th>Role override</th><th>From groups</th><th></th></tr>
         ${users.map(u => `<tr>
           <td>${esc(u.displayName || u.email || "—")}</td>
           <td class="mono">${esc(u.email || u.sub)}</td>
           <td class="muted">${esc(u.lastLoginAt || "")}</td>
           <td><select data-user="${u.id}">${roleOpts(u.roleId)}</select></td>
-        </tr>`).join("")}</table>` : '<p class="muted">No OIDC logins yet.</p>'}
+          <td class="muted">${u.loginRoles?.length ? esc(u.loginRoles.join(", ")) : "—"}</td>
+          <td><button class="btn danger" data-del-user="${u.id}" data-del-user-label="${esc(u.email || u.sub)}">Delete</button></td>
+        </tr>`).join("")}</table>
+        <p class="muted" style="margin:8px 0 0">An override wins over groups; with none, access is the <b>union</b> of every mapped group's role. Deleting a user forgets their row, prefs, credential refs and sessions — it does not revoke access, since a mapped group brings them back at the next login.</p>` : '<p class="muted">No OIDC logins yet.</p>'}
     </section>
     <section class="panel"><h2>Group → role mappings</h2>
       ${mappings.length ? `<table>
@@ -678,6 +681,20 @@ async function renderUsers() {
           <td><button class="btn danger" data-del-client="${esc(c.clientId)}">Delete</button></td>
         </tr>`).join("")}</table>` : '<p class="muted">No registered clients.</p>'}
     </section>`;
+  el.addEventListener("click", async (ev) => {
+    const b = ev.target.closest("[data-del-user]");
+    if (!b) return;
+    const label = b.dataset.delUserLabel;
+    if (!confirm(`Forget ${label}?
+
+Removes their row, personal prefs, credential refs and live sessions. It does NOT revoke access: if a mapped group still contains them, they return at the next login.`)) return;
+    try {
+      const r = await api(`/users/${b.dataset.delUser}`, { method: "DELETE" });
+      toast(`Deleted ${label} — ${r.prefs} pref(s), ${r.credentials} credential ref(s), ${r.sessionsClosed} session(s)`);
+      if (r.note) toast(r.note);
+      renderUsers();
+    } catch (e) { toast(e.message, true); }
+  });
   el.onchange = async (ev) => {
     const s = ev.target; if (!s.dataset.user) return;
     try {

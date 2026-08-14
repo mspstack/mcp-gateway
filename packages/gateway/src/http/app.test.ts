@@ -625,6 +625,37 @@ describe("session reload", () => {
   });
 });
 
+describe("forgetting a user", () => {
+  it("removes the row and everything keyed to that identity, and 404s twice", async () => {
+    const user = repo.upsertUserOnLogin({ iss: "https://idp", sub: "gone", email: "gone@test" });
+    const principal = "oidc:https://idp|gone";
+    repo.setUserPref(principal, "fake", "read_thing", false);
+    repo.setLoginRoles(user.id, [repo.roleByName("viewer")!.id]);
+
+    const del = async () =>
+      fetch(`${base}/api/users/${user.id}`, {
+        method: "DELETE",
+        headers: { Authorization: "Bearer tok-admin" },
+      });
+
+    expect((await del()).status).toBe(200); // idempotent-ish: the second try 404s
+    expect(repo.listUsers().some((u) => u.sub === "gone")).toBe(false);
+    expect(repo.listUserPrefs(principal)).toHaveLength(0);
+    expect(repo.loginRoles(user.id)).toHaveLength(0);
+    expect((await del()).status).toBe(404);
+  });
+
+  it("is admin-only", async () => {
+    const user = repo.upsertUserOnLogin({ iss: "https://idp", sub: "keep-me" });
+    const asViewer = await fetch(`${base}/api/users/${user.id}`, {
+      method: "DELETE",
+      headers: { Authorization: "Bearer tok-viewer" },
+    });
+    expect(asViewer.status).toBe(403);
+    expect(repo.listUsers().some((u) => u.sub === "keep-me")).toBe(true);
+  });
+});
+
 describe("bulk catalog toggle", () => {
   const bulk = (body: unknown, upstream = "fake") =>
     fetch(`${base}/api/catalog/${upstream}`, {

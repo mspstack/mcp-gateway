@@ -427,6 +427,45 @@ export class Repo {
     ).map(mapUser);
   }
 
+  /**
+   * Remove a user row and everything keyed to that identity: group-derived
+   * roles (FK cascade), personal prefs, credential REFS, and any live refresh
+   * tokens. Deliberately NOT an access revocation — someone still in a mapped
+   * group simply gets a fresh row at their next login; this is for clearing
+   * accounts that will never come back (a stale admin login, a departed user).
+   * Secret-store values behind the credential refs are not touched (issue #9).
+   */
+  deleteUser(userId: number): { principal: string; prefs: number; credentials: number; refreshTokens: number } | null {
+    const user = (this.db.prepare("SELECT id, iss, sub FROM users WHERE id = ?").get(userId) ?? null) as
+      | { iss: string; sub: string }
+      | null;
+    if (!user) return null;
+    const principal = `oidc:${user.iss}|${user.sub}`;
+    this.db.exec("BEGIN");
+    try {
+      const prefs = this.db.prepare("DELETE FROM user_prefs WHERE principal = ?").run(principal).changes;
+      const credentials = this.db
+        .prepare("DELETE FROM user_credentials WHERE principal = ?")
+        .run(principal).changes;
+      const refreshTokens = this.db
+        .prepare(
+          "UPDATE oauth_refresh_tokens SET revoked_at = datetime('now') WHERE principal_iss = ? AND principal_sub = ? AND revoked_at IS NULL"
+        )
+        .run(user.iss, user.sub).changes;
+      this.db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+      this.db.exec("COMMIT");
+      return {
+        principal,
+        prefs: Number(prefs),
+        credentials: Number(credentials),
+        refreshTokens: Number(refreshTokens),
+      };
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
   /** Admin/bootstrap override — REPLACES whatever the user's groups map to. */
   setUserRole(userId: number, roleId: number | null): boolean {
     const result = this.db
