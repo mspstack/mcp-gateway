@@ -511,6 +511,105 @@ describe("tools/list_changed notifications", () => {
   });
 });
 
+describe("refused calls", () => {
+  const call = (token: string, sid: string, name: string) =>
+    rpc({ jsonrpc: "2.0", id: 40, method: "tools/call", params: { name, arguments: {} } }, token, sid);
+  const text = (reply: RpcReply) => reply.json?.result?.content?.[0]?.text ?? "";
+
+  it("names the caller's OWN switch, and stays vague about everything else", async () => {
+    const sid = await initSession("tok-viewer");
+
+    // role ceiling — must look exactly like an unknown tool
+    const roleDenied = text(await call("tok-viewer", sid, "fake_write_thing"));
+    const unknown = text(await call("tok-viewer", sid, "fake_nope"));
+    expect(roleDenied).toContain("may not exist");
+    expect(unknown).toContain("may not exist");
+    expect(roleDenied.replace("fake_write_thing", "X")).toBe(unknown.replace("fake_nope", "X"));
+
+    // the caller's own off-switch: say so and point at the page
+    await fetch(`${base}/api/me/prefs`, {
+      method: "PUT",
+      headers: { Authorization: "Bearer tok-viewer", "Content-Type": "application/json" },
+      body: JSON.stringify({ upstreamId: "fake", toolName: "read_thing", enabled: false }),
+    });
+    try {
+      const own = text(await call("tok-viewer", sid, "fake_read_thing"));
+      expect(own).toContain("switched off in your personal settings");
+      expect(own).toContain("/me");
+      expect(own).not.toContain("may not exist");
+    } finally {
+      await fetch(`${base}/api/me/prefs`, {
+        method: "PUT",
+        headers: { Authorization: "Bearer tok-viewer", "Content-Type": "application/json" },
+        body: JSON.stringify({ upstreamId: "fake", toolName: "read_thing", enabled: true }),
+      });
+    }
+  });
+
+  it("keeps the vague wording for an admin kill switch, not the user's business", async () => {
+    const sid = await initSession("tok-viewer");
+    repo.upsertToolSetting({ upstreamId: "fake", toolName: "read_thing", enabled: false });
+    try {
+      expect(text(await call("tok-viewer", sid, "fake_read_thing"))).toContain("may not exist");
+    } finally {
+      repo.upsertToolSetting({ upstreamId: "fake", toolName: "read_thing", enabled: true });
+    }
+  });
+});
+
+describe("session reload", () => {
+  const reload = (token: string) =>
+    fetch(`${base}/api/me/sessions/reload`, { method: "POST", headers: { Authorization: `Bearer ${token}` } });
+
+  it("drops only the caller's own sessions, forcing their clients to re-initialize", async () => {
+    const mine = await initSession("tok-viewer");
+    const alsoMine = await initSession("tok-viewer");
+    const theirs = await initSession("tok-admin");
+
+    const response = await reload("tok-viewer");
+    expect(response.status).toBe(200);
+    // Every session of this principal goes, including ones earlier tests left
+    // behind — the point is "all of mine", not "the two I just made".
+    const body = (await response.json()) as { ok: boolean; closed: number };
+    expect(body.ok).toBe(true);
+    expect(body.closed).toBeGreaterThanOrEqual(2);
+
+    // my sessions are gone — the client must handshake again
+    for (const sid of [mine, alsoMine]) {
+      const after = await rpc({ jsonrpc: "2.0", id: 41, method: "tools/list" }, "tok-viewer", sid);
+      expect(after.status).toBe(404);
+    }
+    // someone else's session is untouched
+    expect(await listFederated("tok-admin", theirs)).toContain("fake_read_thing");
+  });
+
+  it("is admin-only on /api/sessions, and targets one session or one principal", async () => {
+    const sid = await initSession("tok-viewer");
+
+    expect((await fetch(`${base}/api/sessions`, { headers: { Authorization: "Bearer tok-viewer" } })).status).toBe(403);
+
+    const listed = (await (
+      await fetch(`${base}/api/sessions`, { headers: { Authorization: "Bearer tok-admin" } })
+    ).json()) as Array<{ sessionId: string; label: string; streamOpen: boolean }>;
+    expect(listed.find((s) => s.sessionId === sid)?.label).toBe("alice");
+    expect(listed.find((s) => s.sessionId === sid)?.streamOpen).toBe(false);
+
+    const post = (body: unknown) =>
+      fetch(`${base}/api/sessions/reload`, {
+        method: "POST",
+        headers: { Authorization: "Bearer tok-admin", "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    // exactly one selector, never a blanket drop
+    expect((await post({})).status).toBe(400);
+    expect((await post({ sessionId: sid, principal: "static:alice" })).status).toBe(400);
+
+    const closed = (await (await post({ sessionId: sid })).json()) as { closed: number };
+    expect(closed.closed).toBe(1);
+    expect((await rpc({ jsonrpc: "2.0", id: 42, method: "tools/list" }, "tok-viewer", sid)).status).toBe(404);
+  });
+});
+
 describe("bulk catalog toggle", () => {
   const bulk = (body: unknown, upstream = "fake") =>
     fetch(`${base}/api/catalog/${upstream}`, {

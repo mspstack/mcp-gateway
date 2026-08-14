@@ -91,4 +91,17 @@ export class PolicyService {
   visibleEntriesFor(principal: Principal, entries: Iterable<CatalogEntry>): CatalogEntry[] {
     return [...entries].filter((entry) => this.allowsFor(principal, entry));
   }
+
+  /**
+   * WHY a call was refused — only so the caller can be told about a switch they
+   * own. `"personal"`/`"optIn"` mean the admin envelope allows the tool and the
+   * caller's own layer is what closes it; such a tool is already listed on their
+   * /me page, so naming it reveals nothing they can't see there. Everything
+   * else stays `"envelope"` and keeps the no-oracle wording.
+   */
+  denialReason(principal: Principal, entry: CatalogEntry): "allowed" | "envelope" | "personal" | "optIn" {
+    if (!this.allows(principal.roleId, entry)) return "envelope";
+    if (this.allowsFor(principal, entry)) return "allowed";
+    return this.repo.getUpstream(entry.upstreamId)?.spec.userDefault === "off" ? "optIn" : "personal";
+  }
 }

@@ -24,6 +24,8 @@ import type { AppDeps, AuthOutcome } from "./app.js";
 interface MeDeps {
   resolveAuth: (req: Request) => Promise<AuthOutcome>;
   onPolicyChanged: () => void;
+  /** Close matching live MCP sessions; returns how many were dropped. */
+  reloadSessions: (match: (session: { principal: Principal }, sessionId: string) => boolean) => number;
 }
 
 export function createMeRouter(deps: AppDeps, me: MeDeps): Router {
@@ -179,6 +181,21 @@ export function createMeRouter(deps: AppDeps, me: MeDeps): Router {
       );
       me.onPolicyChanged();
       res.json({ ok: true, changed: 1 });
+    })
+  );
+
+  /**
+   * "Apply now": drop MY live MCP sessions so my clients re-initialize and
+   * re-read the tool list. Some clients cache their tool set well past a
+   * notification, and a stale list is what makes a pref change look ignored —
+   * enforcement was never stale, only the display. Own sessions only.
+   */
+  router.post(
+    "/sessions/reload",
+    h((req, res) => {
+      const who = prefsIdentity(req.principal!);
+      const closed = me.reloadSessions((session) => prefsIdentity(session.principal) === who);
+      res.json({ ok: true, closed });
     })
   );
 
