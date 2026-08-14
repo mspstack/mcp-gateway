@@ -3,7 +3,7 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { openDatabase } from "../db/index.js";
 import { Repo } from "../db/repo.js";
 import type { Principal } from "../auth/principal.js";
-import { prefsIdentity, principalSlug } from "../auth/principal.js";
+import { prefsIdentity, principalSlug, withRoles } from "../auth/principal.js";
 import type { CatalogEntry } from "./catalog.js";
 import { PolicyService } from "./policy.js";
 
@@ -21,14 +21,14 @@ function setup() {
   const repo = new Repo(openDatabase(":memory:"));
   const policy = new PolicyService(repo);
   const editorRole = repo.roleByName("editor")!;
-  const editor: Principal = {
-    kind: "oidc",
-    subject: "https://login.example|ab428be9-1111-2222-3333-444455556666",
-    label: "alice",
-    roleId: editorRole.id,
-    roleName: "editor",
-    isAdmin: false,
-  };
+  const editor: Principal = withRoles(
+    {
+      kind: "oidc",
+      subject: "https://login.example|ab428be9-1111-2222-3333-444455556666",
+      label: "alice",
+    },
+    [{ id: editorRole.id, name: "editor", isAdmin: false }]
+  );
   return { repo, policy, editor };
 }
 
@@ -144,7 +144,9 @@ describe("personal narrowing (allowsFor = envelope ∧ prefs)", () => {
     const { repo, policy, editor } = setup();
     repo.setUserPref(prefsIdentity(editor), "up1", "get_doc", false);
     const viewerRole = repo.roleByName("viewer")!;
-    const sameUserNewRole: Principal = { ...editor, roleId: viewerRole.id, roleName: "viewer" };
+    const sameUserNewRole: Principal = withRoles(editor, [
+      { id: viewerRole.id, name: "viewer", isAdmin: false },
+    ]);
     expect(policy.allowsFor(sameUserNewRole, entry("get_doc", "read"))).toBe(false);
   });
 });
@@ -185,28 +187,19 @@ describe("denialReason (only self-inflicted denials are nameable)", () => {
 
 describe("principalSlug", () => {
   it("passes Entra OIDs through recognizably", () => {
-    const p: Principal = {
-      kind: "oidc",
-      subject: "https://login.example|AB428BE9-1111-2222-3333-444455556666",
-      label: "x",
-      roleId: 1,
-      roleName: "viewer",
-      isAdmin: false,
-    };
+    const p: Principal = withRoles({ kind: "oidc", subject: "https://login.example|AB428BE9-1111-2222-3333-444455556666", label: "x" }, [
+      { id: 1, name: "viewer", isAdmin: false },
+    ]);
     expect(principalSlug(p)).toBe("ab428be9-1111-2222-3333-444455556666");
   });
 
   it("hashes non-KV-safe subjects deterministically", () => {
-    const p: Principal = {
-      kind: "oidc",
-      subject: "user@example.com",
-      label: "x",
-      roleId: 1,
-      roleName: "viewer",
-      isAdmin: false,
-    };
+    const p: Principal = withRoles({ kind: "oidc", subject: "user@example.com", label: "x" }, [
+      { id: 1, name: "viewer", isAdmin: false },
+    ]);
     const slug = principalSlug(p);
     expect(slug).toMatch(/^[0-9a-f]{16}$/);
-    expect(principalSlug({ ...p, roleId: 99 })).toBe(slug); // role-independent
+    // role-independent
+    expect(principalSlug(withRoles(p, [{ id: 99, name: "admin", isAdmin: true }]))).toBe(slug);
   });
 });

@@ -34,7 +34,7 @@ import type { UpstreamManager } from "../upstream/manager.js";
 import type { SecretStore } from "../secrets/store.js";
 import type { OidcVerifier, OidcIdentity } from "../auth/oidc.js";
 import { authenticateStaticToken, bearerToken } from "../auth/static-tokens.js";
-import { prefsIdentity, principalKey, type Principal } from "../auth/principal.js";
+import { prefsIdentity, principalKey, withRoles, type Principal } from "../auth/principal.js";
 import {
   SESSION_COOKIE,
   TRANSIENT_COOKIE,
@@ -170,7 +170,7 @@ export function loginUpsert(
   repo: Repo,
   config: GatewayConfig,
   identity: OidcIdentity
-): { user: UserRow; role: RoleRow | null } {
+): { user: UserRow; roles: RoleRow[] } {
   const user = repo.upsertUserOnLogin({
     iss: identity.iss,
     sub: identity.sub,
@@ -189,8 +189,16 @@ export function loginUpsert(
       }
     }
   }
-  const role = repo.resolveOidcRole(identity.iss, identity.sub, identity.groups);
-  return { user, role };
+  // Group claims only ride on a real IdP token, so remember what they mapped to:
+  // the cookie and gateway-JWT paths see no groups and read these back. Stored
+  // even when an explicit override currently wins, so clearing the override
+  // later falls back to today's groups rather than to nothing.
+  repo.setLoginRoles(
+    user.id,
+    repo.rolesForGroups(identity.iss, identity.groups).map((r) => r.id)
+  );
+  const roles = repo.resolveOidcRoles(identity.iss, identity.sub, identity.groups);
+  return { user, roles };
 }
 
 /** Resolve the principal for a request. Exported for tests and the admin API. */
@@ -222,14 +230,9 @@ export function createAuthResolver(deps: AppDeps) {
       }
       return {
         ok: true,
-        principal: {
-          kind: "static",
-          subject: staticEntry.label,
-          label: staticEntry.label,
-          roleId: role.id,
-          roleName: role.name,
-          isAdmin: role.isAdmin,
-        },
+        principal: withRoles({ kind: "static", subject: staticEntry.label, label: staticEntry.label }, [
+          { id: role.id, name: role.name, isAdmin: role.isAdmin },
+        ]),
       };
     }
 
@@ -252,19 +255,19 @@ export function createAuthResolver(deps: AppDeps) {
       } catch (err) {
         return unauthorized(`Invalid token: ${err instanceof Error ? err.message : String(err)}`);
       }
-      const role = repo.resolveOidcRole(identity.iss, identity.sub, []);
-      if (!role) {
+      const roles = repo.resolveOidcRoles(identity.iss, identity.sub, []);
+      if (roles.length === 0) {
         return { ok: false, status: 403, code: -32003, message: NO_ROLE_MESSAGE };
       }
       const user = repo.userBySubject(identity.iss, identity.sub);
-      const principal: Principal = {
-        kind: "oidc",
-        subject: `${identity.iss}|${identity.sub}`,
-        label: user?.email ?? user?.displayName ?? identity.sub,
-        roleId: role.id,
-        roleName: role.name,
-        isAdmin: role.isAdmin,
-      };
+      const principal: Principal = withRoles(
+        {
+          kind: "oidc",
+          subject: `${identity.iss}|${identity.sub}`,
+          label: user?.email ?? user?.displayName ?? identity.sub,
+        },
+        roles
+      );
       cache.set(cacheKey, { principal, expiresAt: Date.now() + CACHE_TTL_MS });
       return { ok: true, principal };
     }
@@ -282,18 +285,14 @@ export function createAuthResolver(deps: AppDeps) {
       } catch (err) {
         return unauthorized(`Invalid token: ${err instanceof Error ? err.message : String(err)}`);
       }
-      const { role } = loginUpsert(repo, config, identity);
-      if (!role) {
+      const { roles } = loginUpsert(repo, config, identity);
+      if (roles.length === 0) {
         return { ok: false, status: 403, code: -32003, message: NO_ROLE_MESSAGE };
       }
-      const principal: Principal = {
-        kind: "oidc",
-        subject: `${identity.iss}|${identity.sub}`,
-        label: identity.email ?? identity.sub,
-        roleId: role.id,
-        roleName: role.name,
-        isAdmin: role.isAdmin,
-      };
+      const principal: Principal = withRoles(
+        { kind: "oidc", subject: `${identity.iss}|${identity.sub}`, label: identity.email ?? identity.sub },
+        roles
+      );
       cache.set(cacheKey, { principal, expiresAt: Date.now() + CACHE_TTL_MS });
       return { ok: true, principal };
     }
@@ -307,21 +306,21 @@ export function createAuthResolver(deps: AppDeps) {
       const cookies = parseCookies(req.headers.cookie);
       const session = readSessionClaims(cookies[SESSION_COOKIE], config.login.sessionSecret);
       if (session) {
-        const role = repo.resolveOidcRole(session.iss, session.sub, []);
-        if (!role) {
+        const roles = repo.resolveOidcRoles(session.iss, session.sub, []);
+        if (roles.length === 0) {
           return { ok: false, status: 403, code: -32003, message: NO_ROLE_MESSAGE };
         }
         const user = repo.userBySubject(session.iss, session.sub);
         return {
           ok: true,
-          principal: {
-            kind: "oidc",
-            subject: `${session.iss}|${session.sub}`,
-            label: user?.email ?? user?.displayName ?? session.sub,
-            roleId: role.id,
-            roleName: role.name,
-            isAdmin: role.isAdmin,
-          },
+          principal: withRoles(
+            {
+              kind: "oidc",
+              subject: `${session.iss}|${session.sub}`,
+              label: user?.email ?? user?.displayName ?? session.sub,
+            },
+            roles
+          ),
         };
       }
     }
@@ -332,14 +331,9 @@ export function createAuthResolver(deps: AppDeps) {
       if (admin) {
         return {
           ok: true,
-          principal: {
-            kind: "dev",
-            subject: "dev",
-            label: "dev-unauthenticated",
-            roleId: admin.id,
-            roleName: admin.name,
-            isAdmin: true,
-          },
+          principal: withRoles({ kind: "dev", subject: "dev", label: "dev-unauthenticated" }, [
+            { id: admin.id, name: admin.name, isAdmin: true },
+          ]),
         };
       }
     }
@@ -594,6 +588,7 @@ export function createApp(deps: AppDeps): express.Express {
       resolveAuth,
       onPolicyChanged: broadcastVisibility,
       reloadSessions,
+      sessionSummaries,
     })
   );
 
@@ -665,10 +660,10 @@ export function createApp(deps: AppDeps): express.Express {
           res.status(401).send("Sign-in failed. Please try again.");
           return;
         }
-        const { user, role } = loginUpsert(deps.repo, config, identity);
-        // Persist the resolved role so the cookie path resolves it from the
-        // stored user row (approach b) — no privilege ever rides in the cookie.
-        if (role) deps.repo.setUserRole(user.id, role.id);
+        // loginUpsert persists the group-derived roles (user_login_roles), which
+        // is what the cookie path reads back — no privilege ever rides in the
+        // cookie, and an explicit admin override still wins over them.
+        loginUpsert(deps.repo, config, identity);
         // OAuth AS facade: this login was brokering user authentication for an
         // MCP client — mint a single-use code bound to the pending request and
         // bounce to the client's registered redirect_uri (validated at
@@ -883,14 +878,9 @@ export function createApp(deps: AppDeps): express.Express {
     const sessionPrincipal = (req: Request): Principal | null => {
       const claims = readSessionClaims(parseCookies(req.headers.cookie)[SESSION_COOKIE], login.sessionSecret);
       if (!claims) return null;
-      return {
-        kind: "oidc",
-        subject: `${claims.iss}|${claims.sub}`,
-        label: claims.sub,
-        roleId: 0,
-        roleName: "",
-        isAdmin: false,
-      };
+      return withRoles({ kind: "oidc", subject: `${claims.iss}|${claims.sub}`, label: claims.sub }, [
+        { id: 0, name: "", isAdmin: false },
+      ]);
     };
 
     // NOTE: registered before the parametric route below — otherwise

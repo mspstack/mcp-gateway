@@ -28,6 +28,7 @@ import { isMaxTier } from "../domain/policy.js";
 import { renderPreset } from "../domain/presets.js";
 import { effectiveGroupOf, effectiveTierOf, resolveToolTargets } from "../domain/tool-targets.js";
 import { runBackup } from "../db/backup.js";
+import { SERVER_VERSION } from "../version.js";
 import type { BackupUploader } from "../db/backup.js";
 
 /** Reserved namespace: `config.ts` refuses it for upstreams. */
@@ -266,7 +267,10 @@ export async function callSelfTool(
   switch (name) {
     case `${SELF_NAMESPACE}_status`:
       return json({
-        version: config.mode === "integrated" ? "integrated" : "standalone",
+        // The field said "version" and carried the MODE — so gw_status claimed
+        // the gateway was running version "integrated". Report both.
+        version: SERVER_VERSION,
+        mode: config.mode,
         toolCount: entries().length,
         upstreams: manager.summaries(),
         secretStore: config.bao ? "openbao" : config.keyVault ? "keyvault" : null,

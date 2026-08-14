@@ -164,7 +164,9 @@ async function renderAccess() {
   try { data = await api("/access"); }
   catch (e) { el.innerHTML = `<section class="panel"><p class="muted">${esc(e.message)}</p></section>`; return; }
 
-  $("#whoami").textContent = data.principal ? `${data.principal.label} · ${data.principal.role}` : "";
+  $("#whoami").textContent = data.principal
+    ? `${data.principal.label} · ${(data.principal.roles ?? [data.principal.role]).join(" + ")}`
+    : "";
 
   if (!data.servers.length) {
     el.innerHTML = `<section class="panel"><h2>My access</h2>
@@ -176,8 +178,15 @@ async function renderAccess() {
 
   el.innerHTML = `<section class="panel"><h2>My access</h2>
     <p class="muted">Turn servers, whole tiers, or individual tools off for your own sessions. You can only narrow what your role already grants — turning something on just removes your personal off-switch.</p>
-    <p class="muted" style="border-left:2px solid var(--accent); padding-left:10px">Changes take effect immediately: a tool you switched off is refused even if your client still lists it. The <em>list</em> your client shows is fetched when it connects — if a change doesn't appear there, use <b>Apply now</b> and your clients will reconnect and pick up the current set.
-      <button class="btn" id="reload-sessions" style="margin-left:8px">Apply now</button></p>
+    <section style="border-left:2px solid var(--accent); padding:2px 0 2px 12px; margin-bottom:14px">
+      <p class="muted" style="margin:0 0 6px"><b style="color:var(--text)">A switch here bites immediately.</b> A tool you turned off is refused on the next call, even while your client still shows it in its list — enforcement and display are two different things.</p>
+      <p class="muted" style="margin:0 0 6px"><b style="color:var(--text)">The list is fetched when a client connects.</b> Change something, then press <b>Apply now</b>: your live sessions are dropped, your clients reconnect and read the current set. Order matters — change first, apply second.</p>
+      <p class="muted" style="margin:0 0 8px">If a tool still doesn't appear, that client is caching the list above the protocol. Then: start a new chat, or turn the connector off and on in your client's settings. Nothing is wrong with your access — check this page, it is the source of truth.</p>
+      <div class="row" style="margin:0; align-items:center">
+        <button class="btn" id="reload-sessions">Apply now</button>
+        <span class="muted" id="session-state"></span>
+      </div>
+    </section>
     ${data.servers.map(s => {
       const counts = tierCounts(s.tools);
       const optIn = s.userDefault === "off";
@@ -285,8 +294,9 @@ async function renderAccess() {
         ? `Reconnecting ${r.closed} session${r.closed === 1 ? "" : "s"} — your client will re-read its tools`
         : "No live sessions to reconnect — your client will read the current set when it connects");
     } catch (e) { toast(e.message, true); }
-    finally { b.disabled = false; }
+    finally { b.disabled = false; renderSessionState(); }
   };
+  renderSessionState();
 
   el.onchange = async (ev) => {
     const i = ev.target;
@@ -298,6 +308,26 @@ async function renderAccess() {
       renderAccess();
     } catch (e) { toast(e.message, true); renderAccess(); }
   };
+}
+
+/**
+ * Connected clients, and whether any of them holds the notification stream.
+ * Without a stream the gateway cannot push tools/list_changed at all, which is
+ * precisely when Apply now is not optional — so say it here instead of leaving
+ * people to guess why a change didn't show up.
+ */
+async function renderSessionState() {
+  const el = $("#session-state");
+  if (!el) return;
+  try {
+    const r = await api("/sessions");
+    const n = r.sessions.length;
+    el.textContent = n === 0
+      ? "no clients connected right now — the next one to connect reads the current set"
+      : `${n} client${n === 1 ? "" : "s"} connected · ` + (r.notificationStream
+          ? "live notifications available"
+          : "no notification channel — press Apply now after a change");
+  } catch { el.textContent = ""; }
 }
 
 // ── My credentials ──

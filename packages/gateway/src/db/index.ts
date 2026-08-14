@@ -16,7 +16,8 @@ export function openDatabase(path: string): DatabaseSync {
   return db;
 }
 
-function migrate(db: DatabaseSync): void {
+/** Exported so migrations can be tested against a hand-built legacy database. */
+export function migrate(db: DatabaseSync): void {
   const version = (db.prepare("PRAGMA user_version").get() as { user_version: number })
     .user_version;
 
@@ -172,5 +173,38 @@ function migrate(db: DatabaseSync): void {
     `);
 
     db.exec("PRAGMA user_version = 4");
+  }
+
+  if (version < 5) {
+    // Additive roles (issue #28). Until now the login path wrote the
+    // group-derived role into users.role_id, which made "the admin chose this
+    // role" and "this came from a group" the same row — and forced a single
+    // winner. Split them:
+    //
+    //   users.role_id + role_source='admin' → an explicit override, REPLACES groups
+    //   user_login_roles                    → every role the last login's groups mapped to
+    //
+    // Existing non-null role_id rows are marked 'admin' deliberately: on a live
+    // deployment they were either set from the Users tab or written back
+    // unchanged by the login path, so treating them as explicit overrides keeps
+    // everyone's access byte-for-byte. The union only starts to matter for users
+    // with no override, which is the state a fresh group mapping produces.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS user_login_roles (
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+        PRIMARY KEY (user_id, role_id)
+      );
+    `);
+    const columns = db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === "role_source")) {
+      db.exec(`
+        ALTER TABLE users ADD COLUMN role_source TEXT
+          CHECK (role_source IS NULL OR role_source IN ('admin','login'));
+        UPDATE users SET role_source = 'admin' WHERE role_id IS NOT NULL;
+      `);
+    }
+
+    db.exec("PRAGMA user_version = 5");
   }
 }

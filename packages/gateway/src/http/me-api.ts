@@ -26,6 +26,8 @@ interface MeDeps {
   onPolicyChanged: () => void;
   /** Close matching live MCP sessions; returns how many were dropped. */
   reloadSessions: (match: (session: { principal: Principal }, sessionId: string) => boolean) => number;
+  /** Live sessions (all principals) — filtered to the caller here. */
+  sessionSummaries: () => Array<Record<string, unknown>>;
 }
 
 export function createMeRouter(deps: AppDeps, me: MeDeps): Router {
@@ -76,7 +78,9 @@ export function createMeRouter(deps: AppDeps, me: MeDeps): Router {
         string,
         Array<{ name: string; exposedName: string; tier: string; group: string; enabled: boolean }>
       >();
-      for (const entry of policy.visibleEntries(principal.roleId, manager.catalogEntries())) {
+      // Union of every role the caller holds (issue #28) — a person in two
+      // mapped groups sees both surfaces here, not just the higher one.
+      for (const entry of policy.envelopeFor(principal, manager.catalogEntries())) {
         const list = byUpstream.get(entry.upstreamId) ?? [];
         list.push({
           name: entry.upstreamToolName,
@@ -90,7 +94,11 @@ export function createMeRouter(deps: AppDeps, me: MeDeps): Router {
         byUpstream.set(entry.upstreamId, list);
       }
       res.json({
-        principal: { label: principal.label, role: principal.roleName },
+        principal: {
+          label: principal.label,
+          role: principal.roleName,
+          roles: principal.roles.map((r) => r.name),
+        },
         servers: [...byUpstream.entries()].map(([upstreamId, tools]) => {
           const spec = repo.getUpstream(upstreamId)?.spec;
           const optIn = spec?.userDefault === "off";
@@ -135,7 +143,7 @@ export function createMeRouter(deps: AppDeps, me: MeDeps): Router {
       // Prefs only make sense inside the envelope; reject junk targets so the
       // table can't fill with garbage (and enabling can never widen anyway —
       // "enable" just deletes the personal deny row).
-      const envelope = policy.visibleEntries(principal.roleId, manager.catalogEntries());
+      const envelope = policy.envelopeFor(principal, manager.catalogEntries());
       const upstreamKnown = envelope.some((e) => e.upstreamId === body.upstreamId);
       const toolKnown =
         body.toolName === "" ||
@@ -190,6 +198,24 @@ export function createMeRouter(deps: AppDeps, me: MeDeps): Router {
    * notification, and a stale list is what makes a pref change look ignored —
    * enforcement was never stale, only the display. Own sessions only.
    */
+  /**
+   * My live MCP sessions. `streamOpen: false` means the gateway has no channel
+   * to push tools/list_changed to that client, which is exactly when "Apply
+   * now" is the only way to make it re-read — worth showing rather than
+   * explaining.
+   */
+  router.get(
+    "/sessions",
+    h((req, res) => {
+      const who = prefsIdentity(req.principal!);
+      const mine = me.sessionSummaries().filter((s) => s.principal === who);
+      res.json({
+        sessions: mine.map(({ sessionId, streamOpen, toolCount }) => ({ sessionId, streamOpen, toolCount })),
+        notificationStream: mine.some((s) => s.streamOpen === true),
+      });
+    })
+  );
+
   router.post(
     "/sessions/reload",
     h((req, res) => {

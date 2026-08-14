@@ -99,21 +99,39 @@ describe("Repo", () => {
     expect(again.email).toBe("a@b.c"); // COALESCE keeps the earlier email
   });
 
-  it("resolveOidcRole: explicit user role beats group mappings; highest tier mapping wins", () => {
+  it("resolveOidcRoles: every mapped group counts; an explicit override replaces them", () => {
     const repo = fresh();
     const viewer = repo.roleByName("viewer")!;
     const editor = repo.roleByName("editor")!;
     const admin = repo.roleByName("admin")!;
     const user = repo.upsertUserOnLogin({ iss: "https://idp", sub: "u1" });
+    const names = (groups: string[]) => repo.resolveOidcRoles("https://idp", "u1", groups).map((r) => r.name);
 
-    expect(repo.resolveOidcRole("https://idp", "u1", ["g1"])).toBeNull();
+    expect(names(["g1"])).toEqual([]);
 
     repo.setGroupMapping("https://idp", "g1", viewer.id);
     repo.setGroupMapping("https://idp", "g2", editor.id);
-    expect(repo.resolveOidcRole("https://idp", "u1", ["g1", "g2"])?.name).toBe("editor");
+    // the UNION, most privileged first — not just the winner (issue #28)
+    expect(names(["g1", "g2"])).toEqual(["editor", "viewer"]);
+    expect(names(["g1"])).toEqual(["viewer"]);
+    // an unmapped group contributes nothing rather than failing the lookup
+    expect(names(["g1", "nope"])).toEqual(["viewer"]);
 
+    // no groups in hand (cookie / gateway-JWT paths) → what the last login stored
+    expect(names([])).toEqual([]);
+    repo.setLoginRoles(user.id, [viewer.id, editor.id]);
+    expect(names([])).toEqual(["editor", "viewer"]);
+    // replace-all: losing a group removes its role instead of accumulating
+    repo.setLoginRoles(user.id, [viewer.id]);
+    expect(names([])).toEqual(["viewer"]);
+
+    // an explicit override replaces group-derived roles entirely
     repo.setUserRole(user.id, admin.id);
-    expect(repo.resolveOidcRole("https://idp", "u1", ["g1"])?.name).toBe("admin");
+    expect(names(["g1", "g2"])).toEqual(["admin"]);
+    expect(repo.userBySubject("https://idp", "u1")?.roleId).toBe(admin.id);
+    // …and clearing it falls back to the roles the last login remembered
+    repo.setUserRole(user.id, null);
+    expect(names([])).toEqual(["viewer"]);
   });
 
   it("stores and reads back OAuth clients", () => {
