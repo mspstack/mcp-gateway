@@ -89,6 +89,7 @@
     <button data-tab="upstreams">MCP servers</button>
     <button data-tab="tools">Tools</button>
     <button data-tab="roles">Roles</button>
+    <button data-tab="toolsets">Tool sets</button>
     <button data-tab="users">Users</button>
     <button data-tab="secrets">Secrets</button>
   </nav>
@@ -97,6 +98,7 @@
     <div id="tab-upstreams" class="hidden"></div>
     <div id="tab-tools" class="hidden"></div>
     <div id="tab-roles" class="hidden"></div>
+    <div id="tab-toolsets" class="hidden"></div>
     <div id="tab-users" class="hidden"></div>
     <div id="tab-secrets" class="hidden"></div>
   </main>
@@ -626,6 +628,234 @@ async function renderRoles() {
   };
 }
 
+// ── Tool sets (#27) + self-service ceiling (#35) ──
+/** Which set's rules are expanded. */
+const setsUi = { open: null };
+
+const modePill = (mode) => mode === "granted"
+  ? '<span class="pill" style="color:var(--accent); border-color:var(--accent)">granted</span>'
+  : '<span class="pill" style="color:var(--ok); border-color:var(--ok)">self-service</span>';
+
+/** A rule's selector in the words the admin used, not database columns. */
+function selectorText(rule) {
+  const parts = [`<span class="mono">${esc(rule.upstreamId)}</span>`];
+  if (rule.toolName !== null) parts.push(`tool <span class="mono">${esc(rule.toolName)}</span>`);
+  if (rule.groupLabel !== null) parts.push(rule.groupLabel === "" ? "<i>(ungrouped)</i>" : esc(rule.groupLabel));
+  if (rule.tier !== null) parts.push(`${esc(rule.tier)} tier`);
+  if (parts.length === 1) parts.push("<i>(whole server)</i>");
+  return parts.join(" · ");
+}
+
+async function renderToolSets() {
+  const el = $("#tab-toolsets");
+  const [sets, { roles }, upstreams, catalog] = await Promise.all([
+    api("/tool-sets"), api("/roles"), api("/upstreams"), api("/catalog")]);
+
+  // Categories actually present per upstream — a picker beats a free-text box
+  // that silently matches nothing.
+  const groupsOf = (upstreamId) => [...new Set(catalog
+    .filter(t => t.upstreamId === upstreamId)
+    .map(t => t.groupLabel ?? t.derivedGroup ?? ""))].sort();
+
+  const rulesFor = setsUi.open ? await api(`/tool-sets/${setsUi.open}/rules`) : [];
+
+  el.innerHTML = `
+    <section class="panel"><h2>Tool sets</h2>
+      <p class="muted">A set is a reusable list of rules — <b>server · category · tier → ceiling</b>. Assign it to a role as
+        <b style="color:var(--accent)">granted</b> (live now) or <b style="color:var(--ok)">self-service</b> (the user may switch it on from their own page).
+        A role with <b>no granted set</b> keeps using the grants matrix on the Roles tab; the first granted set makes that role closed-world —
+        anything no rule covers is denied.</p>
+      ${sets.length ? `<table>
+        <tr><th>Set</th><th>Rules</th><th>Assigned to</th><th></th></tr>
+        ${sets.map(s => `<tr>
+          <td><b>${esc(s.name)}</b>${s.scope === "role" ? ' <span class="pill">role-private</span>' : ""}
+            ${s.description ? `<div class="cellsub">${esc(s.description)}</div>` : ""}</td>
+          <td>${s.ruleCount}</td>
+          <td>${s.assignedTo.length
+            ? s.assignedTo.map(a => `${esc(a.roleName)} ${modePill(a.mode)}`).join("<br>")
+            : '<span class="muted">nobody</span>'}</td>
+          <td style="white-space:nowrap">
+            <button class="btn secondary" data-open-set="${s.id}">${setsUi.open === s.id ? "Hide" : "Rules"}</button>
+            <button class="btn danger" data-del-set="${s.id}" data-set-name="${esc(s.name)}">Delete</button>
+          </td>
+        </tr>
+        ${setsUi.open === s.id ? `<tr><td colspan="4" style="background:var(--panel2)">
+          ${rulesFor.length ? `<table>
+            <tr><th>Selector</th><th>Ceiling</th><th>Covers now</th><th></th></tr>
+            ${rulesFor.map(r => `<tr>
+              <td>${selectorText(r)}</td>
+              <td>${r.maxTier === "none" ? '<span class="pill">excluded</span>' : tierPill(r.maxTier)}</td>
+              <td>${r.matchCount === 0
+                ? '<span class="pill" style="color:var(--warn); border-color:var(--warn)">0 tools — check the category</span>'
+                : `${r.matchCount} tool${r.matchCount === 1 ? "" : "s"} <span class="muted mono">${esc(r.sampleMatches.slice(0,3).join(", "))}${r.matchCount > 3 ? " …" : ""}</span>`}</td>
+              <td><button class="btn danger" data-del-rule="${r.id}">Delete</button></td>
+            </tr>`).join("")}</table>` : '<p class="muted">No rules yet — this set grants nothing.</p>'}
+          <div class="row" style="margin-top:10px">
+            <label>Server <select id="rule-upstream">${upstreams.map(u => `<option>${esc(u.id)}</option>`).join("")}</select></label>
+            <label>Category <select id="rule-group"></select></label>
+            <label>Tier <select id="rule-tier"><option value="">(any)</option>
+              ${["read","write","destructive"].map(t => `<option>${t}</option>`).join("")}</select></label>
+            <label>Ceiling <select id="rule-max">
+              ${["read","write","destructive","none"].map(t => `<option ${t==="read"?"selected":""}>${t}</option>`).join("")}</select></label>
+            <button class="btn" id="add-rule">Add rule</button>
+          </div>
+          <p class="muted" style="margin:0">Ceiling <code>none</code> excludes. Rules are <b>inherited</b>: a tool added to a covered category later needs no edit here.
+            The most specific rule wins — tool beats category beats tier beats whole-server.</p>
+        </td></tr>` : ""}`).join("")}
+      </table>` : '<p class="muted">No sets yet.</p>'}
+      <div class="row" style="margin-top:12px">
+        <label>Name <input id="set-name" placeholder="helpdesk" style="width:160px"></label>
+        <label style="flex:1">Description <input id="set-desc" placeholder="what this set is for"></label>
+        <button class="btn" id="add-set">New set</button>
+      </div>
+    </section>
+
+    <section class="panel"><h2>Assign sets to roles</h2>
+      <p class="muted">Assigning previews itself first: you see how many tools the role gains and loses, with examples, before anything is written.</p>
+      <table>
+        <tr><th>Role</th><th>World</th><th>Assign</th></tr>
+        ${roles.map(r => {
+          const mine = sets.filter(s => s.assignedTo.some(a => a.roleId === r.id));
+          const granted = mine.filter(s => s.assignedTo.find(a => a.roleId === r.id).mode === "granted");
+          return `<tr>
+            <td>${esc(r.name)} ${r.isAdmin ? '<span class="pill">admin</span>' : ""}
+              <div class="cellsub">${mine.length
+                ? mine.map(s => {
+                    const a = s.assignedTo.find(x => x.roleId === r.id);
+                    return `${esc(s.name)} ${modePill(a.mode)} <a href="#" data-unassign="${s.id}" data-role="${r.id}" class="muted">remove</a>`;
+                  }).join("<br>")
+                : '<span class="muted">no sets — legacy grants apply</span>'}</div></td>
+            <td class="muted">${granted.length ? "closed" : "open (grants matrix)"}</td>
+            <td style="white-space:nowrap">
+              <select data-assign-set="${r.id}">${sets.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join("")}</select>
+              <select data-assign-mode="${r.id}"><option value="granted">granted</option><option value="self-service">self-service</option></select>
+              <button class="btn secondary" data-assign="${r.id}">Assign…</button>
+              <button class="btn secondary" data-convert="${r.id}" title="Write today's grants for this role as an explicit set">Convert grants…</button>
+            </td>
+          </tr>`;
+        }).join("")}
+      </table>
+    </section>`;
+
+  // the category picker follows the chosen server
+  const syncGroups = () => {
+    const sel = $("#rule-group");
+    if (!sel) return;
+    sel.innerHTML = `<option value="__any">(any)</option>` +
+      groupsOf($("#rule-upstream").value)
+        .map(g => `<option value="${esc(g)}">${g === "" ? "(ungrouped)" : esc(g)}</option>`).join("");
+  };
+  if ($("#rule-upstream")) { $("#rule-upstream").onchange = syncGroups; syncGroups(); }
+
+  el.onclick = async (ev) => {
+    const t = ev.target;
+    const open = t.closest("[data-open-set]");
+    if (open) {
+      const id = Number(open.dataset.openSet);
+      setsUi.open = setsUi.open === id ? null : id;
+      return renderToolSets();
+    }
+
+    const delSet = t.closest("[data-del-set]");
+    if (delSet) {
+      if (!confirm(`Delete set "${delSet.dataset.setName}"?\n\nIts rules and assignments go with it. Roles that relied on it fall back to the grants matrix.`)) return;
+      try { await api(`/tool-sets/${delSet.dataset.delSet}`, { method: "DELETE" }); toast("Deleted"); renderToolSets(); }
+      catch (e) { toast(e.message, true); }
+      return;
+    }
+
+    const delRule = t.closest("[data-del-rule]");
+    if (delRule) {
+      try {
+        await api(`/tool-sets/${setsUi.open}/rules/${delRule.dataset.delRule}`, { method: "DELETE" });
+        toast("Rule deleted"); renderToolSets();
+      } catch (e) { toast(e.message, true); }
+      return;
+    }
+
+    if (t.id === "add-rule") {
+      const group = $("#rule-group").value;
+      const tier = $("#rule-tier").value;
+      const body = {
+        upstreamId: $("#rule-upstream").value,
+        maxTier: $("#rule-max").value,
+        ...(group === "__any" ? {} : { groupLabel: group }),
+        ...(tier ? { tier } : {}),
+      };
+      try {
+        const r = await api(`/tool-sets/${setsUi.open}/rules`, { method: "PUT", body: JSON.stringify(body) });
+        toast(r.matchCount === 0
+          ? "Saved, but it covers 0 tools right now — check the category"
+          : `Saved — covers ${r.matchCount} tool(s)`);
+        renderToolSets();
+      } catch (e) { toast(e.message, true); }
+      return;
+    }
+
+    if (t.id === "add-set") {
+      const name = $("#set-name").value.trim();
+      if (!name) { toast("Name is required", true); return; }
+      try {
+        const set = await api("/tool-sets", { method: "POST",
+          body: JSON.stringify({ name, description: $("#set-desc").value.trim() || undefined }) });
+        setsUi.open = set.id;
+        toast(`Created "${name}" — add rules to it`);
+        renderToolSets();
+      } catch (e) { toast(e.message, true); }
+      return;
+    }
+
+    const unassign = t.closest("[data-unassign]");
+    if (unassign) {
+      ev.preventDefault();
+      try {
+        const r = await api(`/tool-sets/${unassign.dataset.unassign}/roles`, { method: "PUT",
+          body: JSON.stringify({ roleId: Number(unassign.dataset.role), assigned: false }) });
+        toast(`Removed — role now sees ${r.after} tool(s)`);
+        renderToolSets();
+      } catch (e) { toast(e.message, true); }
+      return;
+    }
+
+    const assign = t.closest("[data-assign]");
+    if (assign) {
+      const roleId = Number(assign.dataset.assign);
+      const setId = $(`[data-assign-set="${roleId}"]`)?.value;
+      const mode = $(`[data-assign-mode="${roleId}"]`).value;
+      if (!setId) { toast("Create a set first", true); return; }
+      try {
+        const dry = await api(`/tool-sets/${setId}/roles`, { method: "PUT",
+          body: JSON.stringify({ roleId, assigned: true, mode, dryRun: true }) });
+        const lines = [
+          `${dry.before} tool(s) now, ${dry.after} after.`,
+          dry.gained ? `Gains ${dry.gained}: ${dry.sampleGained.join(", ")}` : "Gains nothing.",
+          dry.lost ? `LOSES ${dry.lost}: ${dry.sampleLost.join(", ")}` : "Loses nothing.",
+          mode === "self-service" ? "\nSelf-service: nothing goes live until each user switches it on themselves." : "",
+        ];
+        if (!confirm(lines.filter(Boolean).join("\n"))) return;
+        await api(`/tool-sets/${setId}/roles`, { method: "PUT",
+          body: JSON.stringify({ roleId, assigned: true, mode }) });
+        toast("Assigned");
+        renderToolSets();
+      } catch (e) { toast(e.message, true); }
+      return;
+    }
+
+    const convert = t.closest("[data-convert]");
+    if (convert) {
+      const roleId = Number(convert.dataset.convert);
+      try {
+        const dry = await api(`/roles/${roleId}/convert-grants`, { method: "POST", body: JSON.stringify({ dryRun: true }) });
+        const preview = dry.rules.map(r => `  ${r.upstreamId} → ${r.maxTier}`).join("\n");
+        if (!confirm(`Write today's access for this role as set "${dry.setName}":\n\n${preview}\n\nThe role becomes closed-world: a NEW server added later is denied until you add a rule for it.`)) return;
+        await api(`/roles/${roleId}/convert-grants`, { method: "POST", body: JSON.stringify({}) });
+        toast(`Converted — set "${dry.setName}" created and assigned`);
+        renderToolSets();
+      } catch (e) { toast(e.message, true); }
+    }
+  };
+}
+
 // ── Users ──
 async function renderUsers() {
   const el = $("#tab-users");
@@ -809,7 +1039,7 @@ async function renderSecrets() {
 }
 
 const RENDER = { status: renderStatus, upstreams: renderUpstreams, tools: renderTools,
-  roles: renderRoles, users: renderUsers, secrets: renderSecrets };
+  roles: renderRoles, toolsets: renderToolSets, users: renderUsers, secrets: renderSecrets };
 
 async function boot() {
   // Show the Microsoft button only when interactive login actually exists —

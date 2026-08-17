@@ -518,6 +518,21 @@ export class Repo {
     ).map(mapRole);
   }
 
+  /**
+   * Run `fn` and undo every write it made. Used for assignment previews: the
+   * honest way to answer "what would this change?" is to make the change, read
+   * the answer through the normal code path, and roll back — no second
+   * implementation of the resolver to drift from the real one.
+   */
+  dryRun<T>(fn: () => T): T {
+    this.db.exec("BEGIN");
+    try {
+      return fn();
+    } finally {
+      this.db.exec("ROLLBACK");
+    }
+  }
+
   // ── tool sets (#27) + self-service ceiling (#35) ──
 
   listToolSets(): ToolSetRow[] {
