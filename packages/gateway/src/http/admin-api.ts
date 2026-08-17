@@ -540,6 +540,37 @@ export function createAdminRouter(deps: AppDeps, admin: AdminDeps): Router {
     })
   );
 
+  /**
+   * Forget a user: the row, their group-derived roles, personal prefs,
+   * credential refs, refresh tokens, and any live session. NOT a revocation —
+   * anyone still in a mapped group returns on their next login — so the
+   * response says what actually happened rather than implying more.
+   */
+  router.delete(
+    "/users/:id",
+    h((req, res) => {
+      const removed = repo.deleteUser(Number(param(req, "id")));
+      if (!removed) {
+        res.status(404).json({ error: "Unknown user" });
+        return;
+      }
+      const sessionsClosed = admin.reloadSessions(
+        (session) => prefsIdentity(session.principal) === removed.principal
+      );
+      admin.onPolicyChanged();
+      console.error(`[admin] deleted user ${removed.principal} (${sessionsClosed} session(s) closed)`);
+      res.json({
+        ok: true,
+        ...removed,
+        sessionsClosed,
+        note:
+          removed.credentials > 0
+            ? "Credential refs removed; the values still exist in the secret store and need deleting there."
+            : undefined,
+      });
+    })
+  );
+
   router.get(
     "/group-mappings",
     h(async (_req, res) => {
