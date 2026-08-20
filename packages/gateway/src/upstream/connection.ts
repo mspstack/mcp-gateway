@@ -256,9 +256,33 @@ export class UpstreamConnection {
     this.reconnectTimer.unref?.();
   }
 
-  /** List all tools, following pagination. */
+  /**
+   * List all tools, following pagination. Same stale-session recovery as
+   * `callTool`: an upstream that restarted answers 404 for our forgotten
+   * session while the local transport still looks healthy, and without a retry
+   * discovery would throw, the manager would omit the upstream, and every one of
+   * its tools would drop out of the catalog until someone bounced it by hand.
+   */
   async listTools(): Promise<Tool[]> {
     const client = await this.requireClient();
+    try {
+      return await this.collectTools(client);
+    } catch (err) {
+      if (this.connected && !isStaleSession(err)) {
+        throw err; // upstream answered with a real error — not a session problem
+      }
+      console.error(
+        this.connected
+          ? `[upstream:${this.spec.id}] tool discovery hit an expired upstream session — re-initializing`
+          : `[upstream:${this.spec.id}] tool discovery hit a dropped connection — retrying once`
+      );
+      if (this.connected) await this.resetClient();
+      const fresh = await this.requireClient();
+      return await this.collectTools(fresh);
+    }
+  }
+
+  private async collectTools(client: Client): Promise<Tool[]> {
     const tools: Tool[] = [];
     let cursor: string | undefined;
     do {

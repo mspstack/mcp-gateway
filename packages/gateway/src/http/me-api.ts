@@ -257,22 +257,27 @@ export function createMeRouter(deps: AppDeps, me: MeDeps): Router {
       await secretStore.put(path, body.field, body.value);
       const ref = secretStore.refFor(path, body.field);
       repo.upsertUserCredential(prefsIdentity(principal), upstreamId, body.field, ref);
+      // The caller's pooled per-user link was built with the OLD refs and is
+      // memoized until the upstream is bounced — drop it here or the credential
+      // they just rotated keeps being ignored (#44).
+      const dropped = await manager.closePersonalLink(upstreamId, prefsIdentity(principal));
       // Never echo the value.
-      res.json({ ok: true, ref });
+      res.json({ ok: true, ref, reconnected: dropped });
     })
   );
 
   router.delete(
     "/credentials/:upstreamId/:field",
-    h((req, res) => {
-      const removed = repo.deleteUserCredential(
-        prefsIdentity(req.principal!),
-        String(req.params.upstreamId ?? ""),
-        String(req.params.field ?? "")
-      );
+    h(async (req, res) => {
+      const who = prefsIdentity(req.principal!);
+      const upstreamId = String(req.params.upstreamId ?? "");
+      const removed = repo.deleteUserCredential(who, upstreamId, String(req.params.field ?? ""));
+      // Same reason as the write path: the pooled link still holds the ref we
+      // just deleted, so it has to go too (#44).
+      const dropped = await manager.closePersonalLink(upstreamId, who);
       // The secret store copy is left for rotation-history; re-registering
       // overwrites it. (Store-side cleanup can come with sessionMode.)
-      res.json({ ok: removed });
+      res.json({ ok: removed, reconnected: dropped });
     })
   );
 
