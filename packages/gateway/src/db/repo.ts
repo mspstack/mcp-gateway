@@ -7,6 +7,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { parseUpstreamSpec, type UpstreamSpec } from "../config.js";
 import type { MaxTier, Tier } from "../domain/policy.js";
+import type { SetMode, SetScope, ToolSetRule } from "../domain/toolsets.js";
 
 export interface RoleRow {
   id: number;
@@ -105,6 +106,15 @@ export interface UserCredentialRow {
 /** Ordering helper: "most privileged first" for role lists. */
 const TIER_RANK_SQL = `CASE r.default_max_tier
   WHEN 'destructive' THEN 3 WHEN 'write' THEN 2 WHEN 'read' THEN 1 ELSE 0 END`;
+
+export interface ToolSetRow {
+  id: number;
+  name: string;
+  description: string | null;
+  scope: SetScope;
+  ownerRoleId: number | null;
+  source: "api" | "preset";
+}
 
 export class Repo {
   constructor(private readonly db: DatabaseSync) {}
@@ -508,6 +518,160 @@ export class Repo {
     ).map(mapRole);
   }
 
+  /**
+   * Run `fn` and undo every write it made. Used for assignment previews: the
+   * honest way to answer "what would this change?" is to make the change, read
+   * the answer through the normal code path, and roll back — no second
+   * implementation of the resolver to drift from the real one.
+   */
+  dryRun<T>(fn: () => T): T {
+    this.db.exec("BEGIN");
+    try {
+      return fn();
+    } finally {
+      this.db.exec("ROLLBACK");
+    }
+  }
+
+  // ── tool sets (#27) + self-service ceiling (#35) ──
+
+  listToolSets(): ToolSetRow[] {
+    return (
+      this.db
+        .prepare("SELECT id, name, description, scope, owner_role_id, source FROM tool_sets ORDER BY name")
+        .all() as Array<Record<string, unknown>>
+    ).map(mapToolSet);
+  }
+
+  toolSetByName(name: string): ToolSetRow | null {
+    const row = this.db
+      .prepare("SELECT id, name, description, scope, owner_role_id, source FROM tool_sets WHERE name = ?")
+      .get(name) as Record<string, unknown> | undefined;
+    return row ? mapToolSet(row) : null;
+  }
+
+  createToolSet(input: {
+    name: string;
+    description?: string;
+    scope?: SetScope;
+    ownerRoleId?: number | null;
+    source?: "api" | "preset";
+  }): ToolSetRow {
+    const scope = input.scope ?? "shared";
+    this.db
+      .prepare(
+        "INSERT INTO tool_sets (name, description, scope, owner_role_id, source) VALUES (?, ?, ?, ?, ?)"
+      )
+      .run(
+        input.name,
+        input.description ?? null,
+        scope,
+        scope === "role" ? (input.ownerRoleId ?? null) : null,
+        input.source ?? "api"
+      );
+    return this.toolSetByName(input.name)!;
+  }
+
+  deleteToolSet(setId: number): boolean {
+    return this.db.prepare("DELETE FROM tool_sets WHERE id = ?").run(setId).changes > 0;
+  }
+
+  /** Upsert BY SELECTOR: re-saving the same selector changes its ceiling. */
+  setToolSetRule(rule: {
+    setId: number;
+    upstreamId: string;
+    groupLabel?: string | null;
+    tier?: Tier | null;
+    toolName?: string | null;
+    maxTier: MaxTier;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO tool_set_rules (set_id, upstream_id, group_label, tier, tool_name, max_tier)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT (set_id, upstream_id, COALESCE(group_label, char(1)), COALESCE(tier, char(1)), COALESCE(tool_name, char(1)))
+         DO UPDATE SET max_tier = excluded.max_tier`
+      )
+      .run(
+        rule.setId,
+        rule.upstreamId,
+        rule.groupLabel ?? null,
+        rule.tier ?? null,
+        rule.toolName ?? null,
+        rule.maxTier
+      );
+  }
+
+  deleteToolSetRule(ruleId: number): boolean {
+    return this.db.prepare("DELETE FROM tool_set_rules WHERE id = ?").run(ruleId).changes > 0;
+  }
+
+  rulesOfSet(setId: number): ToolSetRule[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT r.id, r.set_id, s.scope, r.upstream_id, r.group_label, r.tier, r.tool_name, r.max_tier
+           FROM tool_set_rules r JOIN tool_sets s ON s.id = r.set_id
+           WHERE r.set_id = ? ORDER BY r.id`
+        )
+        .all(setId) as Array<Record<string, unknown>>
+    ).map(mapToolSetRule);
+  }
+
+  assignToolSet(roleId: number, setId: number, mode: SetMode): void {
+    this.db
+      .prepare(
+        `INSERT INTO role_tool_sets (role_id, set_id, mode) VALUES (?, ?, ?)
+         ON CONFLICT (role_id, set_id) DO UPDATE SET mode = excluded.mode`
+      )
+      .run(roleId, setId, mode);
+  }
+
+  unassignToolSet(roleId: number, setId: number): boolean {
+    return (
+      this.db.prepare("DELETE FROM role_tool_sets WHERE role_id = ? AND set_id = ?").run(roleId, setId)
+        .changes > 0
+    );
+  }
+
+  setsOfRole(roleId: number): Array<ToolSetRow & { mode: SetMode }> {
+    return (
+      this.db
+        .prepare(
+          `SELECT s.id, s.name, s.description, s.scope, s.owner_role_id, s.source, rts.mode
+           FROM role_tool_sets rts JOIN tool_sets s ON s.id = rts.set_id
+           WHERE rts.role_id = ? ORDER BY s.name`
+        )
+        .all(roleId) as Array<Record<string, unknown>>
+    ).map((row) => ({ ...mapToolSet(row), mode: row.mode as SetMode }));
+  }
+
+  /**
+   * Every rule reaching a role in one mode. Empty for a role with no sets —
+   * which is what keeps the legacy path alive (see `roleHasSets`).
+   */
+  rulesForRole(roleId: number, mode: SetMode): ToolSetRule[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT r.id, r.set_id, s.scope, r.upstream_id, r.group_label, r.tier, r.tool_name, r.max_tier
+           FROM role_tool_sets rts
+           JOIN tool_sets s ON s.id = rts.set_id
+           JOIN tool_set_rules r ON r.set_id = s.id
+           WHERE rts.role_id = ? AND rts.mode = ?`
+        )
+        .all(roleId, mode) as Array<Record<string, unknown>>
+    ).map(mapToolSetRule);
+  }
+
+  /** Any assigned set at all flips the role to a closed world. */
+  roleHasSets(roleId: number): boolean {
+    const row = this.db
+      .prepare("SELECT 1 AS present FROM role_tool_sets WHERE role_id = ? AND mode = 'granted' LIMIT 1")
+      .get(roleId) as { present: number } | undefined;
+    return row !== undefined;
+  }
+
   // ── group mappings ──
 
   listGroupMappings(): GroupMappingRow[] {
@@ -796,6 +960,26 @@ const mapRole = (row: Record<string, unknown>): RoleRow => ({
   defaultMaxTier: row.default_max_tier as MaxTier,
   isAdmin: row.is_admin === 1,
   protected: row.protected === 1,
+});
+
+const mapToolSet = (row: Record<string, unknown>): ToolSetRow => ({
+  id: row.id as number,
+  name: row.name as string,
+  description: (row.description as string | null) ?? null,
+  scope: row.scope as SetScope,
+  ownerRoleId: (row.owner_role_id as number | null) ?? null,
+  source: row.source as "api" | "preset",
+});
+
+const mapToolSetRule = (row: Record<string, unknown>): ToolSetRule => ({
+  id: row.id as number,
+  setId: row.set_id as number,
+  scope: row.scope as SetScope,
+  upstreamId: row.upstream_id as string,
+  groupLabel: (row.group_label as string | null) ?? null,
+  tier: (row.tier as Tier | null) ?? null,
+  toolName: (row.tool_name as string | null) ?? null,
+  maxTier: row.max_tier as MaxTier,
 });
 
 const mapToolSetting = (row: Record<string, unknown>): ToolSettingRow => ({

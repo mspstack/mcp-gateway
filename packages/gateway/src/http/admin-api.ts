@@ -18,6 +18,7 @@ import { renderPreset, summarize } from "../domain/presets.js";
 import { UpstreamConnection } from "../upstream/connection.js";
 import { SERVER_VERSION } from "../mcp/gateway-server.js";
 import { prefsIdentity, type Principal } from "../auth/principal.js";
+import { createToolSetsRouter } from "./admin-toolsets-api.js";
 import type { AppDeps, AuthOutcome } from "./app.js";
 
 const REGISTRY_URL = "https://registry.modelcontextprotocol.io/v0/servers";
@@ -679,6 +680,10 @@ export function createAdminRouter(deps: AppDeps, admin: AdminDeps): Router {
       );
     })
   );
+
+  // Tool sets (#27) + the self-service ceiling (#35). Mounted here so it
+  // inherits the isAdmin gate above rather than re-implementing it.
+  router.use(createToolSetsRouter(deps, { onPolicyChanged: admin.onPolicyChanged }));
 
   return router;
 }
