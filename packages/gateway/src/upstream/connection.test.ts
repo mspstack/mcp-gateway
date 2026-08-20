@@ -114,9 +114,32 @@ describe("UpstreamConnection — stale streamable-HTTP sessions", () => {
     expect(connection.connected).toBe(true);
   });
 
+  it("lists tools over the pooled session", async () => {
+    expect((await connection.listTools()).map((t) => t.name)).toEqual(["ping"]);
+  });
+
+  /**
+   * Regression for #42: discovery had no stale-session recovery, so after an
+   * upstream restart listTools() threw, the manager omitted the upstream, and
+   * every one of its tools disappeared from the catalog until a human bounced it.
+   */
+  it("re-initializes and retries once when DISCOVERY hits an expired session", async () => {
+    await connection.listTools();
+    const initializesBefore = upstream.initializeCount;
+
+    upstream.expireAllSessions();
+    const tools = await connection.listTools();
+
+    expect(tools.map((t) => t.name)).toEqual(["ping"]);
+    expect(upstream.initializeCount).toBe(initializesBefore + 1);
+  });
+
   it("does not re-initialize for genuine tool errors", async () => {
+    const initializesBefore = upstream.initializeCount;
     const result = await connection.callTool("does-not-exist", {});
     expect(result.isError).toBe(true); // the upstream's error passes through
-    expect(upstream.initializeCount).toBe(2); // no needless session churn
+    // No needless session churn — counted relative to this test, so adding
+    // cases above cannot shift an absolute number.
+    expect(upstream.initializeCount).toBe(initializesBefore);
   });
 });

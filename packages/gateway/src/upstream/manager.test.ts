@@ -19,6 +19,7 @@ class FakeLink implements UpstreamLink {
   onRecovered: (() => void) | null = null;
   connectCalls = 0;
   failConnect = false;
+  failDiscovery = false;
   lastCall: { name: string; args: Record<string, unknown> } | null = null;
 
   constructor(
@@ -32,6 +33,7 @@ class FakeLink implements UpstreamLink {
   }
 
   async listTools(): Promise<Tool[]> {
+    if (this.failDiscovery) throw new Error("Unknown or expired MCP session");
     return this.tools;
   }
 
@@ -97,6 +99,30 @@ describe("UpstreamManager", () => {
     const { manager } = setup([bad, good]);
     await manager.start();
     expect(exposedNames(manager)).toEqual(["demo_echo"]);
+  });
+
+  /**
+   * #42: discovery can fail while the transport still reports connected, and
+   * `connected: true, lastError: null, toolCount: 0` reads exactly like "this
+   * server has no tools" — which is how an emptied catalog went unnoticed.
+   */
+  it("reports WHY an upstream contributed no tools, instead of looking healthy and empty", async () => {
+    const link = new FakeLink(spec("everything", "demo"), [tool("echo")]);
+    const { manager } = setup([link]);
+    await manager.start();
+    expect(manager.summaries()[0]!.toolCount).toBe(1);
+
+    link.failDiscovery = true;
+    await manager.refreshCatalog();
+
+    const summary = manager.summaries()[0]!;
+    expect(summary.toolCount).toBe(0);
+    expect(summary.lastError).toMatch(/tool discovery failed/i);
+
+    // …and the error clears once discovery works again.
+    link.failDiscovery = false;
+    await manager.refreshCatalog();
+    expect(manager.summaries()[0]!).toMatchObject({ toolCount: 1, lastError: null });
   });
 
   it("skips disabled upstreams but still reports them in summaries", async () => {

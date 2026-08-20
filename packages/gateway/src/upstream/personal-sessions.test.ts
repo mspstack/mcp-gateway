@@ -197,6 +197,63 @@ describe("per-user upstream sessions", () => {
     expect(after).toMatch(/^who via bao:gw-user-/);
   });
 
+  /**
+   * Regression for #44: the personal link was memoized per principal and only
+   * ever flushed by the upstream lifecycle, so a credential the user rotated on
+   * /me kept being ignored — silently — until someone bounced the upstream.
+   */
+  it("a credential write drops that caller's pooled link so the new value is picked up", async () => {
+    await putCredential("tok-alice", "peruser", "first-secret");
+    await callTool("tok-alice", "peruser_who"); // builds + pools the link
+    const before = linksCreated.length;
+
+    const rotated = await fetch(`${base}/api/me/credentials/peruser`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer tok-alice" },
+      body: JSON.stringify({ field: "Authorization", value: "rotated-secret" }),
+    });
+    expect((await rotated.json()) as { reconnected: boolean }).toMatchObject({ reconnected: true });
+
+    await callTool("tok-alice", "peruser_who");
+    expect(linksCreated.length).toBeGreaterThan(before); // rebuilt, not reused
+  });
+
+  it("only the writer's link is dropped — other principals keep theirs", async () => {
+    await putCredential("tok-bob", "peruser", "bob-secret");
+    await callTool("tok-bob", "peruser_who");
+    await callTool("tok-alice", "peruser_who");
+    const before = linksCreated.length;
+
+    await putCredential("tok-alice", "peruser", "alice-again");
+    await callTool("tok-bob", "peruser_who"); // bob's link untouched
+
+    expect(linksCreated.length).toBe(before);
+  });
+
+  it("a credential delete drops the link too, so the stale ref cannot linger", async () => {
+    await putCredential("tok-alice", "peruser", "to-be-deleted");
+    await callTool("tok-alice", "peruser_who");
+    const before = linksCreated.length;
+
+    const removed = await fetch(`${base}/api/me/credentials/peruser/Authorization`, {
+      method: "DELETE",
+      headers: { Authorization: "Bearer tok-alice" },
+    });
+    expect((await removed.json()) as { ok: boolean; reconnected: boolean }).toMatchObject({
+      ok: true,
+      reconnected: true,
+    });
+
+    // No creds left → the call falls back to the SHARED link (this upstream
+    // allows it), so the caller now travels on the gateway's own credential
+    // rather than on a personal ref that no longer exists.
+    const text = await callTool("tok-alice", "peruser_who");
+    expect(text).toContain("bao:upstreams/peruser");
+    expect(text).not.toContain("gw-user-");
+    // The shared link already existed, so nothing new had to be built.
+    expect(linksCreated.length).toBe(before);
+  });
+
   it("upstream removal closes and forgets personal links", async () => {
     const before = linksCreated.length;
     await manager.upsertUpstream(perUserSpec); // upsert = remove + re-register
