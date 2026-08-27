@@ -41,6 +41,20 @@ const strictSpec: UpstreamSpec = {
   requirePersonalCredentials: true,
 };
 
+// Service-account upstream: shared credentials, per-caller identity header —
+// nothing for the user to register (the mcp-connectwise-automate shape).
+const identitySpec: UpstreamSpec = {
+  id: "ident",
+  namespace: "ident",
+  transport: "http",
+  url: "http://unused/mcp",
+  headers: { Authorization: "Bearer shared-service" },
+  enabled: true,
+  sessionMode: "per-user",
+  requirePersonalCredentials: false,
+  identityHeaders: { "x-actor": "email" },
+};
+
 const tools: Tool[] = [
   { name: "who", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
 ];
@@ -59,7 +73,9 @@ function fakeLink(spec: UpstreamSpec): UpstreamLink {
     },
     async callTool(name): Promise<CallToolResult> {
       const auth = spec.transport === "http" ? (spec.headers.Authorization ?? "none") : "none";
-      return { content: [{ type: "text", text: `${name} via ${auth}` }] };
+      const actor =
+        spec.transport === "http" && spec.headers["x-actor"] ? ` actor=${spec.headers["x-actor"]}` : "";
+      return { content: [{ type: "text", text: `${name} via ${auth}${actor}` }] };
     },
     async close() {},
   };
@@ -91,12 +107,14 @@ const config: GatewayConfig = {
 let httpServer: HttpServer;
 let base: string;
 let manager: UpstreamManager;
+let repo: Repo;
 
 beforeAll(async () => {
-  const repo = new Repo(openDatabase(":memory:"));
+  repo = new Repo(openDatabase(":memory:"));
   repo.upsertUpstream(perUserSpec, "api");
   repo.upsertUpstream(strictSpec, "api");
-  manager = new UpstreamManager([perUserSpec, strictSpec], fakeLink);
+  repo.upsertUpstream(identitySpec, "api");
+  manager = new UpstreamManager([perUserSpec, strictSpec, identitySpec], fakeLink);
   await manager.start();
   const app = createApp({
     config,
@@ -260,5 +278,36 @@ describe("per-user upstream sessions", () => {
     await callTool("tok-alice", "peruser_who");
     // A fresh personal link had to be created after the pool was flushed.
     expect(linksCreated.length).toBeGreaterThan(before);
+  });
+});
+
+describe("identityHeaders (service-account upstreams)", () => {
+  it("routes each caller over a personal link carrying THEIR identity — nothing to register", async () => {
+    // Static-token principals have no email on file, so "email" falls back to
+    // the subject (the token label) — the header is never absent.
+    expect(await callTool("tok-alice", "ident_who")).toBe(
+      "who via Bearer shared-service actor=alice"
+    );
+    expect(await callTool("tok-bob", "ident_who")).toBe("who via Bearer shared-service actor=bob");
+  });
+
+  it("refuses to store a personal credential under an identity field", async () => {
+    const response = await fetch(`${base}/api/me/credentials/ident`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer tok-alice" },
+      body: JSON.stringify({ field: "x-actor", value: "spoofed-identity" }),
+    });
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as { error: string }).error).toMatch(/reserved/);
+  });
+
+  it("the identity value is layered last, so even a pre-existing row cannot override it", async () => {
+    // Simulate a rogue/legacy row written before the field became reserved.
+    repo.upsertUserCredential("static:alice", "ident", "x-actor", "bao:spoof#x");
+    await manager.closePersonalLink("ident", "static:alice"); // force a rebuild
+    expect(await callTool("tok-alice", "ident_who")).toBe(
+      "who via Bearer shared-service actor=alice"
+    );
+    repo.deleteUserCredential("static:alice", "ident", "x-actor");
   });
 });

@@ -253,6 +253,17 @@ export function createMeRouter(deps: AppDeps, me: MeDeps): Router {
         })
         .parse(req.body);
 
+      // Identity fields are the gateway's to write: at call time they are
+      // computed from the signed-in principal and layered over everything, so
+      // storing one here could only ever be an attempt to impersonate.
+      const spec = repo.getUpstream(upstreamId)?.spec;
+      if (spec?.identityHeaders && Object.hasOwn(spec.identityHeaders, body.field)) {
+        res.status(400).json({
+          error: `Field "${body.field}" is reserved — the gateway injects it from your signed-in identity.`,
+        });
+        return;
+      }
+
       const path = `gw-user-${principalSlug(principal)}-${upstreamId}`;
       await secretStore.put(path, body.field, body.value);
       const ref = secretStore.refFor(path, body.field);

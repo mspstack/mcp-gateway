@@ -10,7 +10,13 @@ const planner = BUILTIN_PRESETS.find((p) => p.id === "planner")!;
 
 describe("builtin presets", () => {
   it("cover the family and validate against their own schema", () => {
-    expect(BUILTIN_PRESETS.map((p) => p.id).sort()).toEqual(["cipp", "cwpsa", "itglue", "planner"]);
+    expect(BUILTIN_PRESETS.map((p) => p.id).sort()).toEqual([
+      "cipp",
+      "cwa",
+      "cwpsa",
+      "itglue",
+      "planner",
+    ]);
     for (const p of BUILTIN_PRESETS.filter((p) => p.id !== "cipp")) {
       expect(p.grants).toEqual({ viewer: "read", editor: "write" });
     }
@@ -43,6 +49,29 @@ describe("builtin presets", () => {
       header: "Authorization",
       prefix: "Bearer ",
     });
+  });
+
+  it("cwa renders a service-account spec with identity assertion, no personal credentials", () => {
+    const spec = renderPreset(BUILTIN_PRESETS.find((p) => p.id === "cwa")!, {
+      url: "https://cwa.example/mcp",
+      usernameRef: "svc_mcp",
+      passwordRef: "kv:gw-cwa-password",
+      actorSecretRef: "kv:gw-cwa-actor-secret",
+      // toolsets omitted — optional, renders empty (server default applies)
+    });
+    if (spec.transport !== "http") throw new Error("unreachable");
+    expect(spec.headers).toEqual({
+      "x-cwa-username": "svc_mcp",
+      "x-cwa-password": "kv:gw-cwa-password", // a REF, resolved at connect
+      "x-cwa-actor-secret": "kv:gw-cwa-actor-secret",
+      "x-cwa-toolsets": "",
+    });
+    expect(spec.sessionMode).toBe("per-user");
+    expect(spec.requirePersonalCredentials).toBe(false);
+    // The identity map is literal config, not a {{param}} — it must survive
+    // rendering untouched.
+    expect(spec.identityHeaders).toEqual({ "x-cwa-actor": "email" });
+    expect(spec.personalCredentials).toBeUndefined();
   });
 
   it("summaries omit the spec template", () => {
