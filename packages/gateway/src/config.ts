@@ -116,6 +116,21 @@ const upstreamBase = {
     )
     .optional(),
   /**
+   * Per-user identity injection: header (http) / env var (stdio) name → which
+   * principal field the gateway injects, computed from the AUTHENTICATED
+   * principal at call time — never from anything the client sent. "email"
+   * falls back to the principal subject when no email is on file, so the
+   * value is always present on per-user calls and a downstream actor gate
+   * (e.g. mcp-connectwise-automate's x-cwa-actor) can rely on it. A field
+   * named here is reserved: /me refuses to store a personal credential under
+   * it, and at call time the identity value is layered LAST — a user must
+   * never choose who the gateway says they are. Meaningful only with
+   * sessionMode:"per-user"; the shared/discovery link never carries it.
+   */
+  identityHeaders: z
+    .record(z.string().regex(/^[A-Za-z0-9_-]+$/), z.enum(["email", "subject", "label"]))
+    .optional(),
+  /**
    * One-click "Connect" on /me: the gateway runs an Entra authorization-code
    * + PKCE flow against a PUBLIC client and stores the resulting refresh
    * token as the user's personal credential — no scripts, no copy-paste.

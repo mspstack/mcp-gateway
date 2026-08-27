@@ -122,6 +122,57 @@ export const BUILTIN_PRESETS: Preset[] = [
     grants: { viewer: "read", editor: "write" },
   }),
   presetSchema.parse({
+    id: "cwa",
+    title: "ConnectWise Automate (mcp-connectwise-automate)",
+    description:
+      "RMM: universal read/write tools plus read-only SQL. All calls run under one Automate service " +
+      "account (SSO users have no local API password), and the gateway asserts each caller's identity " +
+      "via x-cwa-actor + the shared actor secret — the server's per-user gates (CWA_DB_ALLOWED_USERS/" +
+      "CLASSES) and audit then see the real person. Nothing to register per user. For gated toolsets " +
+      "to appear in the catalog, allowlist the service account on the server (discovery runs without an actor).",
+    params: [
+      { key: "url", label: "Server URL", placeholder: "https://mcp-cwa.example.com/mcp" },
+      {
+        key: "usernameRef",
+        label: "Service account username (or reference)",
+        placeholder: "svc_mcp — or kv:gw-cwa-username",
+      },
+      {
+        key: "passwordRef",
+        label: "Service account password REFERENCE (not the value)",
+        placeholder: "kv:gw-cwa-password — write the value on the Secrets tab first",
+      },
+      {
+        key: "actorSecretRef",
+        label: "Actor shared-secret REFERENCE (the server's CWA_ACTOR_SECRET)",
+        placeholder: "kv:gw-cwa-actor-secret",
+      },
+      {
+        key: "toolsets",
+        label: "Toolsets",
+        required: false,
+        placeholder: "ro,rw,sql / readonly / all — empty = server default",
+      },
+    ],
+    spec: {
+      id: "cwa",
+      namespace: "cwa",
+      transport: "http",
+      url: "{{url}}",
+      headers: {
+        "x-cwa-username": "{{usernameRef}}",
+        "x-cwa-password": "{{passwordRef}}",
+        "x-cwa-actor-secret": "{{actorSecretRef}}",
+        "x-cwa-toolsets": "{{toolsets}}",
+      },
+      // per-user so every call travels on the caller's own link carrying
+      // x-cwa-actor; no personal credentials — the service account is shared.
+      sessionMode: "per-user",
+      identityHeaders: { "x-cwa-actor": "email" },
+    },
+    grants: { viewer: "read", editor: "write" },
+  }),
+  presetSchema.parse({
     id: "cipp",
     title: "CIPP (CyberDrain Improved Partner Portal)",
     description:

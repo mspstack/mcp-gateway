@@ -13,6 +13,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { prefsIdentity, type Principal } from "../auth/principal.js";
+import type { UpstreamSpec } from "../config.js";
 import type { PolicyService } from "../domain/policy.js";
 import type { UpstreamManager } from "../upstream/manager.js";
 import { callSelfTool, SELF_TOOLS, type SelfToolDeps } from "./self-tools.js";
@@ -24,6 +25,32 @@ export { SERVER_NAME, SERVER_VERSION };
 /** Field→secretRef map of the principal's registered creds for an upstream. */
 export type PersonalCredsLookup = (upstreamId: string) => Record<string, string>;
 
+/**
+ * The spec's identityHeaders resolved for one principal. Values are literals
+ * (not secret refs) and pass through connect-time injection untouched. "email"
+ * falls back to the subject so the value is never absent — a per-user call
+ * must never silently degrade to an identity-less one, or a downstream actor
+ * gate would fall back to trusting the shared service account. Pure —
+ * exported for tests.
+ */
+export function identityHeaderValues(
+  spec: UpstreamSpec | undefined,
+  principal: Principal,
+  email: string | null
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [field, source] of Object.entries(spec?.identityHeaders ?? {})) {
+    const value =
+      source === "email"
+        ? (email ?? principal.subject)
+        : source === "subject"
+          ? principal.subject
+          : principal.label;
+    if (value) out[field] = value;
+  }
+  return out;
+}
+
 export function createGatewayServer(
   manager: UpstreamManager,
   policy: PolicyService,
@@ -32,7 +59,9 @@ export function createGatewayServer(
   /** Admin-only self-management tools; omit to serve federated tools only. */
   selfTools?: SelfToolDeps,
   /** Public /me URL, so a self-inflicted denial can point at the switch. */
-  meUrl?: string
+  meUrl?: string,
+  /** The principal's email on file (users table), for identityHeaders. */
+  principalEmail: string | null = null
 ): Server {
   const server = new Server(
     { name: SERVER_NAME, version: SERVER_VERSION },
@@ -97,13 +126,7 @@ export function createGatewayServer(
     const spec = manager.specFor(entry.upstreamId);
     if (spec?.sessionMode === "per-user") {
       const credentialRefs = personalCredsFor?.(entry.upstreamId) ?? {};
-      if (Object.keys(credentialRefs).length > 0) {
-        return manager.callTool(entry, args, {
-          sessionKey: prefsIdentity(principal),
-          credentialRefs,
-        });
-      }
-      if (spec.requirePersonalCredentials) {
+      if (Object.keys(credentialRefs).length === 0 && spec.requirePersonalCredentials) {
         return {
           isError: true,
           content: [
@@ -113,6 +136,21 @@ export function createGatewayServer(
             },
           ],
         };
+      }
+      // Identity values are computed from the AUTHENTICATED principal and
+      // layered last, so a user-registered field of the same name can never
+      // override who the gateway says the caller is (/me also refuses to
+      // store one). They alone are enough to route the call over a personal
+      // link — that is the whole point for service-account upstreams.
+      const overlay = {
+        ...credentialRefs,
+        ...identityHeaderValues(spec, principal, principalEmail),
+      };
+      if (Object.keys(overlay).length > 0) {
+        return manager.callTool(entry, args, {
+          sessionKey: prefsIdentity(principal),
+          credentialRefs: overlay,
+        });
       }
       // No personal creds and fallback allowed → shared connection.
     }

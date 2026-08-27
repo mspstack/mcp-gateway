@@ -489,6 +489,17 @@ export function createApp(deps: AppDeps): express.Express {
       }
 
       const principal = auth.principal;
+      // Email on file for identityHeaders — only OIDC principals have one
+      // (their subject is `${iss}|${sub}`; iss is a URL, so the first "|"
+      // splits it). Static tokens fall back to the subject at resolve time.
+      const principalEmail = (() => {
+        if (principal.kind !== "oidc") return null;
+        const sep = principal.subject.indexOf("|");
+        if (sep < 0) return null;
+        const iss = principal.subject.slice(0, sep);
+        const sub = principal.subject.slice(sep + 1);
+        return deps.repo.userBySubject(iss, sub)?.email ?? null;
+      })();
       const server = createGatewayServer(
         manager,
         policy,
@@ -514,7 +525,8 @@ export function createApp(deps: AppDeps): express.Express {
               onPolicyChanged: broadcastVisibility,
             }
           : undefined,
-        `${config.publicUrl.replace(/\/+$/, "")}/me`
+        `${config.publicUrl.replace(/\/+$/, "")}/me`,
+        principalEmail
       );
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),

@@ -4,6 +4,7 @@ import {
   loadConfig,
   parseConfigFile,
   parseStaticTokens,
+  parseUpstreamSpec,
   substituteEnv,
 } from "./config.js";
 
@@ -21,6 +22,24 @@ describe("substituteEnv", () => {
   it("throws ConfigError on unset variables", () => {
     expect(() => substituteEnv("${MISSING_VAR}", env, "upstream x")).toThrow(ConfigError);
     expect(() => substituteEnv("${MISSING_VAR}", env, "upstream x")).toThrow(/MISSING_VAR/);
+  });
+});
+
+describe("parseUpstreamSpec — identityHeaders", () => {
+  const base = { id: "x", namespace: "x", transport: "http", url: "https://x/mcp" };
+
+  it("accepts valid principal-field sources", () => {
+    const spec = parseUpstreamSpec({ ...base, identityHeaders: { "x-cwa-actor": "email" } });
+    expect(spec.identityHeaders).toEqual({ "x-cwa-actor": "email" });
+  });
+
+  it("rejects unknown sources and malformed field names", () => {
+    expect(() => parseUpstreamSpec({ ...base, identityHeaders: { "x-actor": "role" } })).toThrow(
+      ConfigError
+    );
+    expect(() =>
+      parseUpstreamSpec({ ...base, identityHeaders: { "bad header": "email" } })
+    ).toThrow(ConfigError);
   });
 });
 
