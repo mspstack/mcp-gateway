@@ -204,6 +204,32 @@ describe("Repo", () => {
     expect(repo.consumeOauthRefreshToken("rt1", "c1").status).toBe("invalid"); // cascaded
   });
 
+  it("sweeps stale clients: old + tokenless go, live or young stay", () => {
+    const repo = fresh();
+    repo.createOauthClient({ clientId: "c-abandoned", clientName: null, redirectUris: ["https://a/cb"] });
+    repo.createOauthClient({ clientId: "c-live", clientName: null, redirectUris: ["https://b/cb"] });
+    repo.insertOauthRefreshToken({
+      tokenHash: "rt-live", clientId: "c-live", principalIss: "https://idp", principalSub: "u1",
+      familyId: "rt-live", rotatedFrom: null, expiresAt: Date.now() + 60_000,
+    });
+    repo.createOauthClient({ clientId: "c-expired-tokens", clientName: null, redirectUris: ["https://c/cb"] });
+    repo.insertOauthRefreshToken({
+      tokenHash: "rt-dead", clientId: "c-expired-tokens", principalIss: "https://idp", principalSub: "u2",
+      familyId: "rt-dead", rotatedFrom: null, expiresAt: Date.now() + 1, // dies before the sweep's `now`
+    });
+
+    // default cutoff (30 days ago): everything here is too young to sweep
+    expect(repo.sweepStaleOauthClients()).toEqual([]);
+
+    // cutoff in the future (days = -1) makes every row "old": only the client
+    // with a live refresh token survives
+    const swept = repo.sweepStaleOauthClients(-1, Date.now() + 10);
+    expect(swept.sort()).toEqual(["c-abandoned", "c-expired-tokens"]);
+    expect(repo.listOauthClients().map((c) => c.clientId)).toEqual(["c-live"]);
+    // and the dead client's token rows were cascaded
+    expect(repo.consumeOauthRefreshToken("rt-dead", "c-expired-tokens").status).toBe("invalid");
+  });
+
   it("refresh tokens rotate once; replay is classified as reuse; family revocation kills the chain", () => {
     const repo = fresh();
     const base = { clientId: "c1", principalIss: "https://idp", principalSub: "u1", familyId: "root" };

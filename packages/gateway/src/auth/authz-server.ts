@@ -98,6 +98,13 @@ export interface RegistrationError {
 
 /** Validate an RFC 7591 registration request and persist the client. */
 export function registerClient(repo: Repo, body: unknown): RegistrationResult | RegistrationError {
+  // Opportunistic hygiene (same convention as expired codes/refresh tokens):
+  // every registration sweeps abandoned clients, so the table maintains
+  // itself without a scheduler.
+  const swept = repo.sweepStaleOauthClients();
+  if (swept.length > 0) {
+    console.error(`[oauth] swept ${swept.length} stale client(s) — 30+ days old with no live refresh tokens`);
+  }
   const req = (body ?? {}) as Record<string, unknown>;
   const redirectUris = req.redirect_uris;
   if (!Array.isArray(redirectUris) || redirectUris.length === 0 || !redirectUris.every((u) => typeof u === "string")) {

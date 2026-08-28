@@ -900,7 +900,9 @@ async function renderUsers() {
     </section>
     <section class="panel"><h2>OAuth clients (DCR)</h2>
       <p class="muted">MCP clients that registered themselves via the authorization-server facade.
-        Deleting one revokes its refresh tokens; outstanding access tokens expire within an hour.</p>
+        Deleting one revokes its refresh tokens; outstanding access tokens expire within an hour.
+        Abandoned clients (30+ days old, nobody holding a live refresh token) are removed
+        automatically on the next registration.</p>
       ${oauthClients.length ? `<table>
         <tr><th>Name</th><th>Status</th><th>Used by</th><th>Client id</th><th>Redirect URIs</th><th>Registered</th><th></th></tr>
         ${oauthClients.map(c => `<tr>
