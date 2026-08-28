@@ -783,6 +783,12 @@ export function createApp(deps: AppDeps): express.Express {
           if (state !== null) target.searchParams.set("state", state);
           res.redirect(302, target.href);
         };
+        // The redirect_uri is registered, so redirecting the error is safe
+        // (no open redirect) — and it's the only channel the human behind the
+        // MCP client will actually see.
+        if (client.status !== "approved") {
+          return fail("access_denied", "this client is awaiting administrator approval on the gateway");
+        }
         if (queryParam(req.query.response_type) !== "code") {
           return fail("unsupported_response_type", 'only response_type "code" is supported');
         }
@@ -813,6 +819,17 @@ export function createApp(deps: AppDeps): express.Express {
         const param = (name: string): string | undefined => queryParam(body[name]);
         const grantType = param("grant_type");
         const tokenClientId = param("client_id");
+
+        // Defense in depth for pending clients: authorize already refuses
+        // them, but a client approved-then-deleted-then-re-registered (or a
+        // guessed client_id) must not redeem anything either.
+        if (tokenClientId) {
+          const tokenClient = deps.repo.oauthClient(tokenClientId);
+          if (tokenClient && tokenClient.status !== "approved") {
+            res.status(400).json({ error: "invalid_client", error_description: "client is awaiting administrator approval" });
+            return;
+          }
+        }
 
         /** Common success shape for both grants: fresh access + rotated refresh. */
         const issueTokens = async (principal: { iss: string; sub: string }, refreshToken: string) => {

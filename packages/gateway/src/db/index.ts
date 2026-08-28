@@ -287,4 +287,36 @@ export function migrate(db: DatabaseSync): void {
 
     db.exec("PRAGMA user_version = 6");
   }
+
+  if (version < 7) {
+    // DCR client gating: an admin-managed redirect-URI allowlist decides
+    // whether a self-registered client starts life approved or pending.
+    // Existing clients (and every client while the allowlist is empty) are
+    // 'approved' so deployments that never touch the feature keep today's
+    // behaviour byte-for-byte.
+    db.exec(`
+      -- A hand-built legacy DB (migrate-v5.test.ts) may lack the table entirely.
+      CREATE TABLE IF NOT EXISTS oauth_clients (
+        client_id TEXT PRIMARY KEY,
+        client_name TEXT,
+        redirect_uris_json TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE IF NOT EXISTS oauth_redirect_allowlist (
+        id INTEGER PRIMARY KEY,
+        pattern TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+    const clientColumns = db.prepare("PRAGMA table_info(oauth_clients)").all() as Array<{ name: string }>;
+    if (!clientColumns.some((c) => c.name === "status")) {
+      db.exec(`
+        ALTER TABLE oauth_clients ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'
+          CHECK (status IN ('approved','pending'));
+      `);
+    }
+
+    db.exec("PRAGMA user_version = 7");
+  }
 }

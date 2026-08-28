@@ -72,6 +72,22 @@ export interface RegistrationResult {
   clientId: string;
   clientName: string | null;
   redirectUris: string[];
+  status: "approved" | "pending";
+}
+
+/**
+ * Glob match against one admin-configured allowlist pattern: `*` matches any
+ * run of characters, everything else is literal. Matching is case-sensitive —
+ * redirect URIs are compared byte-for-byte at authorize time too.
+ */
+export function redirectUriMatchesPattern(uri: string, pattern: string): boolean {
+  const regex = new RegExp(
+    `^${pattern
+      .split("*")
+      .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      .join(".*")}$`
+  );
+  return regex.test(uri);
 }
 
 export interface RegistrationError {
@@ -105,9 +121,21 @@ export function registerClient(repo: Repo, body: unknown): RegistrationResult | 
   }
   const clientName = typeof req.client_name === "string" ? req.client_name.slice(0, 200) : null;
   const clientId = randomUUID();
-  repo.createOauthClient({ clientId, clientName, redirectUris: redirectUris as string[] });
-  console.error(`[oauth] registered client ${clientId} ("${clientName ?? "unnamed"}")`);
-  return { ok: true, clientId, clientName, redirectUris: redirectUris as string[] };
+  // An empty allowlist keeps DCR fully open (auto-approve — pre-allowlist
+  // behaviour). With entries, EVERY redirect URI must match one, otherwise the
+  // client registers as pending and /oauth/authorize refuses it until an admin
+  // approves it in the UI.
+  const patterns = repo.listOauthRedirectPatterns();
+  const status =
+    patterns.length === 0 ||
+    (redirectUris as string[]).every((uri) => patterns.some((p) => redirectUriMatchesPattern(uri, p.pattern)))
+      ? "approved"
+      : "pending";
+  repo.createOauthClient({ clientId, clientName, redirectUris: redirectUris as string[], status });
+  console.error(
+    `[oauth] registered client ${clientId} ("${clientName ?? "unnamed"}")${status === "pending" ? " — PENDING admin approval (redirect URIs outside the allowlist)" : ""}`
+  );
+  return { ok: true, clientId, clientName, redirectUris: redirectUris as string[], status };
 }
 
 // ── Authorization codes (single-use, hashed at rest) ────────────────────────

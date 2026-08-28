@@ -351,6 +351,73 @@ describe("refresh_token grant", () => {
   });
 });
 
+describe("DCR redirect-URI allowlist gating", () => {
+  const adminApi = (path: string, init: RequestInit = {}) =>
+    fetch(`${base}/api${path}`, {
+      ...init,
+      headers: { Authorization: "Bearer tok-admin", "Content-Type": "application/json", ...init.headers },
+    });
+
+  it("non-matching clients register as pending and cannot authorize or redeem until approved", async () => {
+    expect(
+      (await adminApi("/oauth-redirect-allowlist", { method: "POST", body: JSON.stringify({ pattern: "http://127.0.0.1:*" }) })).status
+    ).toBe(201);
+    // duplicate pattern → 409
+    expect(
+      (await adminApi("/oauth-redirect-allowlist", { method: "POST", body: JSON.stringify({ pattern: "http://127.0.0.1:*" }) })).status
+    ).toBe(409);
+
+    // a matching client is auto-approved and the whole flow still works
+    const good = await register();
+    const verifier = "allowlist-good-verifier-allowlist-43chars!";
+    const { code } = await authorizeAndCallback(good, pkce(verifier));
+    expect((await exchangeToken(good, code, verifier)).status).toBe(200);
+
+    // a client outside the allowlist registers fine (RFC 7591) but lands pending
+    const rogueRedirect = "https://rogue.example/cb";
+    const reg = await fetch(`${base}/oauth/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ redirect_uris: [rogueRedirect], client_name: "Rogue" }),
+    });
+    expect(reg.status).toBe(201);
+    const rogueId = ((await reg.json()) as { client_id: string }).client_id;
+
+    // authorize → error redirect to the REGISTERED uri (safe), access_denied
+    const query = new URLSearchParams({
+      response_type: "code", client_id: rogueId, redirect_uri: rogueRedirect,
+      code_challenge: pkce(verifier), code_challenge_method: "S256", state: "s",
+    });
+    const denied = await fetch(`${base}/oauth/authorize?${query}`, { redirect: "manual" });
+    expect(denied.status).toBe(302);
+    const target = new URL(denied.headers.get("location")!);
+    expect(`${target.origin}${target.pathname}`).toBe(rogueRedirect);
+    expect(target.searchParams.get("error")).toBe("access_denied");
+
+    // the token endpoint refuses the pending client before touching any grant
+    const refused = await fetch(`${base}/oauth/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ grant_type: "authorization_code", code: "x", client_id: rogueId, code_verifier: "x" }),
+    });
+    expect(refused.status).toBe(400);
+    expect(((await refused.json()) as { error: string }).error).toBe("invalid_client");
+
+    // admin approval unblocks it: authorize now proceeds to the IdP
+    expect((await adminApi(`/oauth-clients/${rogueId}/approve`, { method: "POST" })).status).toBe(200);
+    const allowed = await fetch(`${base}/oauth/authorize?${query}`, { redirect: "manual" });
+    expect(allowed.status).toBe(302);
+    expect(allowed.headers.get("location")).toBe("https://entra.example/authorize?req=1");
+
+    // cleanup so later suites keep the historical open-DCR behaviour
+    const patterns = (await (await adminApi("/oauth-redirect-allowlist")).json()) as Array<{ id: number }>;
+    for (const p of patterns) {
+      expect((await adminApi(`/oauth-redirect-allowlist/${p.id}`, { method: "DELETE" })).status).toBe(200);
+    }
+    await adminApi(`/oauth-clients/${rogueId}`, { method: "DELETE" });
+  });
+});
+
 describe("gateway-token auth on /mcp + PRM discovery", () => {
   const initBody = {
     jsonrpc: "2.0",

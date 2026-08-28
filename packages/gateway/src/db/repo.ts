@@ -55,11 +55,25 @@ export interface UserPrefRow {
   enabled: boolean;
 }
 
+export type OauthClientStatus = "approved" | "pending";
+
 export interface OauthClientRow {
   clientId: string;
   clientName: string | null;
   redirectUris: string[];
+  status: OauthClientStatus;
   createdAt: string;
+}
+
+export interface OauthRedirectPatternRow {
+  id: number;
+  pattern: string;
+  createdAt: string;
+}
+
+/** A DCR client plus the people currently holding live refresh tokens for it. */
+export interface OauthClientWithUsers extends OauthClientRow {
+  users: string[];
 }
 
 export interface OauthCodeRow {
@@ -802,17 +816,51 @@ export class Repo {
 
   // ── OAuth AS facade (DCR clients + single-use authorization codes) ──
 
-  createOauthClient(client: { clientId: string; clientName: string | null; redirectUris: string[] }): void {
+  createOauthClient(client: {
+    clientId: string;
+    clientName: string | null;
+    redirectUris: string[];
+    status?: OauthClientStatus;
+  }): void {
     this.db
-      .prepare("INSERT INTO oauth_clients (client_id, client_name, redirect_uris_json) VALUES (?, ?, ?)")
-      .run(client.clientId, client.clientName, JSON.stringify(client.redirectUris));
+      .prepare("INSERT INTO oauth_clients (client_id, client_name, redirect_uris_json, status) VALUES (?, ?, ?, ?)")
+      .run(client.clientId, client.clientName, JSON.stringify(client.redirectUris), client.status ?? "approved");
   }
 
   oauthClient(clientId: string): OauthClientRow | null {
     const row = this.db
-      .prepare("SELECT client_id, client_name, redirect_uris_json, created_at FROM oauth_clients WHERE client_id = ?")
+      .prepare("SELECT client_id, client_name, redirect_uris_json, status, created_at FROM oauth_clients WHERE client_id = ?")
       .get(clientId) as Record<string, unknown> | undefined;
     return row ? mapOauthClient(row) : null;
+  }
+
+  setOauthClientStatus(clientId: string, status: OauthClientStatus): boolean {
+    return this.db.prepare("UPDATE oauth_clients SET status = ? WHERE client_id = ?").run(status, clientId).changes > 0;
+  }
+
+  // ── OAuth redirect-URI allowlist (DCR gating) ──
+
+  listOauthRedirectPatterns(): OauthRedirectPatternRow[] {
+    return (
+      this.db.prepare("SELECT id, pattern, created_at FROM oauth_redirect_allowlist ORDER BY pattern").all() as Array<
+        Record<string, unknown>
+      >
+    ).map((row) => ({
+      id: row.id as number,
+      pattern: row.pattern as string,
+      createdAt: row.created_at as string,
+    }));
+  }
+
+  /** Returns false when the pattern already exists. */
+  addOauthRedirectPattern(pattern: string): boolean {
+    return (
+      this.db.prepare("INSERT OR IGNORE INTO oauth_redirect_allowlist (pattern) VALUES (?)").run(pattern).changes > 0
+    );
+  }
+
+  removeOauthRedirectPattern(id: number): boolean {
+    return this.db.prepare("DELETE FROM oauth_redirect_allowlist WHERE id = ?").run(id).changes > 0;
   }
 
   /**
@@ -862,12 +910,34 @@ export class Repo {
     return row ? mapOauthCode(row) : null;
   }
 
-  listOauthClients(): OauthClientRow[] {
-    return (
+  listOauthClients(): OauthClientWithUsers[] {
+    const clients = (
       this.db
-        .prepare("SELECT client_id, client_name, redirect_uris_json, created_at FROM oauth_clients ORDER BY created_at DESC, client_id")
+        .prepare(
+          "SELECT client_id, client_name, redirect_uris_json, status, created_at FROM oauth_clients ORDER BY created_at DESC, client_id"
+        )
         .all() as Array<Record<string, unknown>>
     ).map(mapOauthClient);
+    // Attribution comes from live refresh tokens: DCR registration itself is
+    // anonymous, so "whose client is this" is only knowable while someone holds
+    // an unexpired, unrevoked token minted through it.
+    const holders = this.db
+      .prepare(
+        `SELECT DISTINCT rt.client_id AS client_id,
+                COALESCE(u.email, u.display_name, rt.principal_sub) AS who
+         FROM oauth_refresh_tokens rt
+         LEFT JOIN users u ON u.iss = rt.principal_iss AND u.sub = rt.principal_sub
+         WHERE rt.revoked_at IS NULL AND rt.expires_at > ?
+         ORDER BY who`
+      )
+      .all(Date.now()) as Array<{ client_id: string; who: string }>;
+    const byClient = new Map<string, string[]>();
+    for (const h of holders) {
+      const list = byClient.get(h.client_id) ?? [];
+      list.push(h.who);
+      byClient.set(h.client_id, list);
+    }
+    return clients.map((c) => ({ ...c, users: byClient.get(c.clientId) ?? [] }));
   }
 
   /** Remove a registered client and everything minted for it (codes + refresh tokens). */
@@ -1011,6 +1081,7 @@ const mapOauthClient = (row: Record<string, unknown>): OauthClientRow => ({
   clientId: row.client_id as string,
   clientName: (row.client_name as string | null) ?? null,
   redirectUris: JSON.parse(row.redirect_uris_json as string) as string[],
+  status: row.status as OauthClientStatus,
   createdAt: row.created_at as string,
 });
 
