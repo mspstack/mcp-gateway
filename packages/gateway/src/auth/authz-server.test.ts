@@ -12,6 +12,7 @@ import {
   redeemAuthorizationCode,
   redeemRefreshToken,
   redirectUriAllowed,
+  redirectUriMatchesPattern,
   registerClient,
   verifyAccessToken,
 } from "./authz-server.js";
@@ -43,6 +44,19 @@ describe("redirectUriAllowed", () => {
   });
 });
 
+describe("redirectUriMatchesPattern", () => {
+  it("treats * as a wildcard and everything else as literal (regex chars included)", () => {
+    expect(redirectUriMatchesPattern("https://claude.ai/api/mcp/auth_callback", "https://claude.ai/api/mcp/auth_callback")).toBe(true);
+    expect(redirectUriMatchesPattern("http://localhost:33418/cb", "http://localhost:*")).toBe(true);
+    expect(redirectUriMatchesPattern("http://localhost:9/other", "http://localhost:*")).toBe(true);
+    expect(redirectUriMatchesPattern("http://localhost.evil.example/cb", "http://localhost:*")).toBe(false);
+    // "." is literal, not regex-any: claudeXai must not slip through
+    expect(redirectUriMatchesPattern("https://claudeXai/api/mcp/auth_callback", "https://claude.ai/*")).toBe(false);
+    // pattern is anchored: a matching prefix alone is not enough
+    expect(redirectUriMatchesPattern("https://claude.ai/api/mcp/auth_callback.evil.example", "https://claude.ai/api/mcp/auth_callback")).toBe(false);
+  });
+});
+
 describe("registerClient", () => {
   it("registers a public client and persists it", () => {
     const repo = fresh();
@@ -56,6 +70,31 @@ describe("registerClient", () => {
     const stored = repo.oauthClient(result.clientId)!;
     expect(stored.clientName).toBe("Claude Code");
     expect(stored.redirectUris).toEqual(["http://127.0.0.1:9000/cb"]);
+  });
+
+  it("gates registration on the redirect-URI allowlist: match → approved, miss → pending", () => {
+    const repo = fresh();
+    // empty allowlist → auto-approved (historical behaviour)
+    const open = registerClient(repo, { redirect_uris: ["https://anything.example/cb"] });
+    expect(open.ok && open.status).toBe("approved");
+
+    repo.addOauthRedirectPattern("https://claude.ai/api/mcp/auth_callback");
+    repo.addOauthRedirectPattern("http://localhost:*");
+
+    const claude = registerClient(repo, { redirect_uris: ["https://claude.ai/api/mcp/auth_callback"] });
+    expect(claude.ok && claude.status).toBe("approved");
+    const cli = registerClient(repo, { redirect_uris: ["http://localhost:33418/cb"] });
+    expect(cli.ok && cli.status).toBe("approved");
+
+    const stranger = registerClient(repo, { redirect_uris: ["https://search.clickup-prod.com/connect/mcp"] });
+    expect(stranger.ok && stranger.status).toBe("pending");
+    if (stranger.ok) expect(repo.oauthClient(stranger.clientId)?.status).toBe("pending");
+
+    // EVERY uri must match — one stray uri poisons the registration
+    const mixed = registerClient(repo, {
+      redirect_uris: ["https://claude.ai/api/mcp/auth_callback", "https://evil.example/cb"],
+    });
+    expect(mixed.ok && mixed.status).toBe("pending");
   });
 
   it("rejects missing/forbidden redirect_uris and confidential clients", () => {

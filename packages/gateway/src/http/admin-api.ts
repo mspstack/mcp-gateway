@@ -502,6 +502,61 @@ export function createAdminRouter(deps: AppDeps, admin: AdminDeps): Router {
     })
   );
 
+  router.post(
+    "/oauth-clients/:clientId/approve",
+    h((req, res) => {
+      const clientId = param(req, "clientId");
+      if (!repo.setOauthClientStatus(clientId, "approved")) {
+        res.status(404).json({ error: "Unknown client" });
+        return;
+      }
+      console.error(`[oauth] admin approved client ${clientId}`);
+      res.json({ ok: true });
+    })
+  );
+
+  // ── OAuth redirect-URI allowlist (DCR gating) ──
+  // Empty list = every valid registration is auto-approved (the historical
+  // behaviour). With entries, a client whose every redirect URI matches a
+  // pattern is auto-approved; anything else registers as pending.
+
+  router.get(
+    "/oauth-redirect-allowlist",
+    h((_req, res) => {
+      res.json(repo.listOauthRedirectPatterns());
+    })
+  );
+
+  router.post(
+    "/oauth-redirect-allowlist",
+    h((req, res) => {
+      const pattern = typeof (req.body as Record<string, unknown>)?.pattern === "string"
+        ? ((req.body as Record<string, unknown>).pattern as string).trim()
+        : "";
+      if (!pattern || pattern.length > 500) {
+        res.status(400).json({ error: "pattern must be a non-empty string (max 500 chars)" });
+        return;
+      }
+      if (!repo.addOauthRedirectPattern(pattern)) {
+        res.status(409).json({ error: "pattern already exists" });
+        return;
+      }
+      res.status(201).json({ ok: true });
+    })
+  );
+
+  router.delete(
+    "/oauth-redirect-allowlist/:id",
+    h((req, res) => {
+      const id = Number(param(req, "id"));
+      if (!Number.isInteger(id) || !repo.removeOauthRedirectPattern(id)) {
+        res.status(404).json({ error: "Unknown pattern" });
+        return;
+      }
+      res.json({ ok: true });
+    })
+  );
+
   // ── users / group mappings ──
 
   router.get(

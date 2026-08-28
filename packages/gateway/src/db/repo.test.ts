@@ -185,6 +185,18 @@ describe("Repo", () => {
     });
 
     expect(repo.listOauthClients().map((c) => c.clientId).sort()).toEqual(["c1", "c2"]);
+
+    // "Used by" attribution: live refresh tokens name their holder (email when
+    // the users table knows them, raw sub otherwise); expired/revoked don't count.
+    repo.upsertUserOnLogin({ iss: "https://idp", sub: "u1", email: "one@ndr.test" });
+    repo.insertOauthRefreshToken({
+      tokenHash: "rt-expired", clientId: "c2", principalIss: "https://idp", principalSub: "u9",
+      familyId: "rt-expired", rotatedFrom: null, expiresAt: Date.now() - 1,
+    });
+    const byId = new Map(repo.listOauthClients().map((c) => [c.clientId, c.users]));
+    expect(byId.get("c1")).toEqual(["one@ndr.test"]);
+    expect(byId.get("c2")).toEqual([]);
+
     expect(repo.deleteOauthClient("c1")).toBe(true);
     expect(repo.deleteOauthClient("c1")).toBe(false); // gone
     expect(repo.listOauthClients().map((c) => c.clientId)).toEqual(["c2"]);

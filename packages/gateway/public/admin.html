@@ -859,8 +859,8 @@ async function renderToolSets() {
 // ── Users ──
 async function renderUsers() {
   const el = $("#tab-users");
-  const [users, { roles }, mappings, oauthClients, status] = await Promise.all([
-    api("/users"), api("/roles"), api("/group-mappings"), api("/oauth-clients"), api("/status")]);
+  const [users, { roles }, mappings, oauthClients, redirectAllowlist, status] = await Promise.all([
+    api("/users"), api("/roles"), api("/group-mappings"), api("/oauth-clients"), api("/oauth-redirect-allowlist"), api("/status")]);
   const roleOpts = (sel) => `<option value="">(none)</option>` +
     roles.map(r => `<option value="${r.id}" ${sel===r.id?"selected":""}>${esc(r.name)}</option>`).join("");
   el.innerHTML = `
@@ -902,14 +902,36 @@ async function renderUsers() {
       <p class="muted">MCP clients that registered themselves via the authorization-server facade.
         Deleting one revokes its refresh tokens; outstanding access tokens expire within an hour.</p>
       ${oauthClients.length ? `<table>
-        <tr><th>Name</th><th>Client id</th><th>Redirect URIs</th><th>Registered</th><th></th></tr>
+        <tr><th>Name</th><th>Status</th><th>Used by</th><th>Client id</th><th>Redirect URIs</th><th>Registered</th><th></th></tr>
         ${oauthClients.map(c => `<tr>
           <td>${esc(c.clientName || "—")}</td>
+          <td>${c.status === "pending"
+            ? `<span class="pill write" title="Registered with a redirect URI outside the allowlist — cannot sign in until approved">pending</span>`
+            : '<span class="pill read">approved</span>'}</td>
+          <td>${c.users?.length ? c.users.map(esc).join("<br>") : '<span class="muted" title="No live refresh tokens — holder unknown until someone signs in through this client">—</span>'}</td>
           <td class="mono">${esc(c.clientId)}</td>
           <td class="mono">${c.redirectUris.map(esc).join("<br>")}</td>
           <td class="muted">${esc(c.createdAt)}</td>
-          <td><button class="btn danger" data-del-client="${esc(c.clientId)}">Delete</button></td>
+          <td style="white-space:nowrap">${c.status === "pending"
+            ? `<button class="btn" data-approve-client="${esc(c.clientId)}">Approve</button> `
+            : ""}<button class="btn danger" data-del-client="${esc(c.clientId)}">Delete</button></td>
         </tr>`).join("")}</table>` : '<p class="muted">No registered clients.</p>'}
+      <h3 style="margin:16px 0 4px">Redirect URI allowlist</h3>
+      <p class="muted" style="margin-top:0">Empty list = every valid registration is auto-approved.
+        With entries, a new client is auto-approved only when each of its redirect URIs matches a
+        pattern (<span class="mono">*</span> matches anything); everything else registers as
+        <em>pending</em> and cannot sign in until approved above. Existing clients are not affected.</p>
+      ${redirectAllowlist.length ? `<table>
+        <tr><th>Pattern</th><th>Added</th><th></th></tr>
+        ${redirectAllowlist.map(p => `<tr>
+          <td class="mono">${esc(p.pattern)}</td>
+          <td class="muted">${esc(p.createdAt)}</td>
+          <td><button class="btn danger" data-del-allow="${p.id}">Remove</button></td>
+        </tr>`).join("")}</table>` : ""}
+      <div style="display:flex; gap:8px; margin-top:8px; align-items:center">
+        <input id="allow-pattern" placeholder="https://claude.ai/api/mcp/auth_callback" style="flex:1; max-width:480px">
+        <button class="btn" id="allow-add">Add pattern</button>
+      </div>
     </section>`;
   el.addEventListener("click", async (ev) => {
     const b = ev.target.closest("[data-del-user]");
@@ -940,8 +962,26 @@ Removes their row, personal prefs, credential refs and live sessions. It does NO
       catch (e) { toast(e.message, true); }
       return;
     }
+    const a = ev.target.closest("[data-approve-client]");
+    if (a) {
+      try { await api("/oauth-clients/" + encodeURIComponent(a.dataset.approveClient) + "/approve", { method: "POST" }); toast("Approved"); renderUsers(); }
+      catch (e) { toast(e.message, true); }
+      return;
+    }
+    const d = ev.target.closest("[data-del-allow]");
+    if (d) {
+      try { await api("/oauth-redirect-allowlist/" + d.dataset.delAllow, { method: "DELETE" }); renderUsers(); }
+      catch (e) { toast(e.message, true); }
+      return;
+    }
     const b = ev.target.closest("[data-del-map]"); if (!b) return;
     try { await api("/group-mappings/" + b.dataset.delMap, { method: "DELETE" }); renderUsers(); }
+    catch (e) { toast(e.message, true); }
+  };
+  $("#allow-add").onclick = async () => {
+    const pattern = $("#allow-pattern").value.trim();
+    if (!pattern) return;
+    try { await api("/oauth-redirect-allowlist", { method: "POST", body: JSON.stringify({ pattern }) }); renderUsers(); }
     catch (e) { toast(e.message, true); }
   };
   $("#map-add").onclick = async () => {
