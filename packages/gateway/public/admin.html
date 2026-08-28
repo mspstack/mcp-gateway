@@ -580,8 +580,15 @@ async function renderTools() {
 // ── Roles ──
 async function renderRoles() {
   const el = $("#tab-roles");
-  const [{ roles, grants }, upstreams, aclData] = await Promise.all([api("/roles"), api("/upstreams"), api("/acls")]);
+  const [{ roles, grants }, upstreams, aclData, oauthClients] = await Promise.all([
+    api("/roles"), api("/upstreams"), api("/acls"), api("/oauth-clients")]);
   const grantFor = (r, u) => (grants.find(g => g.roleId === r && g.upstreamId === u) || {}).maxTier || "";
+  // A loopback redirect means the client runs ON a user's machine, so its calls
+  // carry that machine's address. Anything else is a hosted connector whose
+  // tools/call traffic comes from the vendor's cloud — the case a tool-class
+  // ACL cannot express. Approved clients only: pending ones cannot call anything.
+  const isLoopback = (uri) => /^http:\/\/(localhost|127\.0\.0\.1|\[?::1\]?)(:|\/|$)/i.test(uri);
+  const cloudClients = oauthClients.filter(c => c.status !== "pending" && c.redirectUris.some(u => !isLoopback(u)));
   const aclScopes = [
     ["tier:destructive", "Destructive tools"],
     ["tier:write", "Write tools"],
@@ -616,12 +623,37 @@ async function renderRoles() {
       <p class="muted">Per-tool allow/deny overrides for a role are set from the Tools data via the API (<code>PUT /api/overrides</code>).</p>
     </section>
     <section class="panel"><h2>Network ACLs</h2>
-      <p class="muted">Named IP/CIDR lists, enforced per request. A binding on a tool class blocks
-        <em>calls</em> of that (effective) tier from outside the list — tools stay visible in
-        tools/list, the call gets a clear error. The browser-surface binding locks /admin, /me,
-        /api, sign-in and /oauth/authorize; the machine endpoints (/mcp, token, register) are
-        never restricted — MCP vendors call them from unpredictable addresses.
+      <p class="muted">Named IP/CIDR lists, enforced per request.
         ${aclData.enforcement ? "" : '<b style="color:var(--err)">Enforcement is OFF (ACL_ENFORCEMENT=off)</b>.'}</p>
+      <div style="border-left:3px solid var(--warn); padding:2px 0 2px 12px; margin:10px 0">
+        <p style="margin:0 0 6px"><b>Read this before binding a tool class.</b> An IP ACL can only
+          see the address the request actually arrives from, and that depends on <em>how the client
+          connects</em> — not on where the person sits.</p>
+        <p class="muted" style="margin:0 0 6px"><b>Direct connections</b> — Claude Code with a
+          locally configured server (<span class="mono">claude mcp add --transport http …</span>),
+          scripts, anything running on a workstation — reach the gateway from that machine, so the
+          ACL sees the office or VPN address. <b>Tool-class bindings work as intended here.</b></p>
+        <p class="muted" style="margin:0 0 6px"><b>OAuth cloud connectors</b> — claude.ai (web and
+          mobile), ChatGPT, and similar — run on the vendor's servers. The person's browser only
+          does the sign-in; every <span class="mono">tools/call</span> afterwards arrives from the
+          vendor's cloud, from addresses that are neither yours nor stable.
+          <b>A tool-class binding blocks those clients for everyone</b>, wherever they are sitting,
+          and the addresses cannot be allowlisted.</p>
+        <p class="muted" style="margin:0">The <b>browser-surface</b> binding is unaffected by this:
+          /admin, /me, /api and sign-in are always driven by a real browser, so pinning them to
+          corporate networks works with every kind of client. To restrict tool classes by
+          workstation, move users to direct connections first — or express the limit by role
+          instead of by network.</p>
+      </div>
+      ${cloudClients.length ? `<p style="color:var(--warn)"><b>On this gateway right now:</b>
+        ${cloudClients.length} registered OAuth client(s) connect from vendor infrastructure —
+        ${cloudClients.map(c => esc(c.clientName || c.clientId.slice(0, 8))).join(", ")}.
+        Binding any tool class below will block their calls.</p>` : ""}
+      <p class="muted">Mechanics: a tool-class binding blocks <em>calls</em> of that (effective)
+        tier from outside the list — tools stay visible in tools/list and the call returns an error
+        naming the ACL. The machine endpoints (/mcp itself, token, register, discovery) are never
+        restricted: they carry their own auth and must stay reachable for any client to work at
+        all.</p>
       ${aclData.acls.length ? `<table>
         <tr><th>Name</th><th>IPs / CIDRs</th><th></th></tr>
         ${aclData.acls.map(a => `<tr>
@@ -648,9 +680,25 @@ async function renderRoles() {
   el.onchange = async (ev) => {
     const s = ev.target;
     if (s.dataset.aclBind !== undefined) {
+      const scope = s.dataset.aclBind;
+      // Binding a TOOL CLASS is the footgun: hosted connectors call from the
+      // vendor's cloud and will all start failing. Name them in the prompt so
+      // the consequence is concrete, not a doc someone skipped.
+      if (s.value && scope.startsWith("tier:") && cloudClients.length) {
+        const names = cloudClients.map(c => c.clientName || c.clientId.slice(0, 8)).join(", ");
+        if (!confirm(`Restrict ${scope.slice(5)} tools to this ACL?
+
+${cloudClients.length} registered client(s) connect from vendor infrastructure (${names}). Their calls arrive from the vendor's cloud, not from your networks, so ALL of their ${scope.slice(5)}-tier calls will start failing — for every user, wherever they are.
+
+Only direct connections (Claude Code configured locally on a workstation) can satisfy a network ACL.`)) {
+          s.value = aclData.bindings[scope] ?? "";
+          return;
+        }
+      }
       try {
-        await api("/acl-bindings", { method: "PUT", body: JSON.stringify({ scope: s.dataset.aclBind, aclId: s.value ? Number(s.value) : null }) });
+        await api("/acl-bindings", { method: "PUT", body: JSON.stringify({ scope, aclId: s.value ? Number(s.value) : null }) });
         toast(s.value ? "Bound" : "Unbound — scope is now unrestricted");
+        renderRoles();
       } catch (e) { toast(e.message, true); }
       return;
     }
