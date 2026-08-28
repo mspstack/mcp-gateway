@@ -262,6 +262,18 @@ export interface GatewayConfig {
   devAllowUnauthenticated: boolean;
   bao: BaoConfig | null;
   keyVault: KeyVaultConfig | null;
+  /**
+   * Trust the X-Forwarded-For header appended by a fronting proxy (Azure App
+   * Service, nginx). Off by default: without a proxy the header is
+   * client-controlled and must not decide ACLs. TRUST_PROXY=true.
+   */
+  trustProxy?: boolean;
+  /**
+   * Network ACL enforcement master switch. ACL_ENFORCEMENT=off is the
+   * break-glass for locking yourself out of the admin UI with a bad ACL
+   * (needs an app-settings change + restart, loudly logged at boot).
+   */
+  aclEnforcement?: boolean;
 }
 
 /** Substitute `${VAR}` references from env; unset variables are a hard error. */
@@ -586,5 +598,7 @@ export function loadConfig(
     devAllowUnauthenticated: env.DEV_ALLOW_UNAUTHENTICATED === "true",
     bao,
     keyVault,
+    trustProxy: (cleanEnv(env.TRUST_PROXY) ?? "").toLowerCase() === "true",
+    aclEnforcement: (cleanEnv(env.ACL_ENFORCEMENT) ?? "on").toLowerCase() !== "off",
   };
 }

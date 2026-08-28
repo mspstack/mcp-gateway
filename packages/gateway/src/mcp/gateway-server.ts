@@ -85,7 +85,7 @@ export function createGatewayServer(
     return { tools };
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     // The `gw` namespace is reserved (config.ts refuses it for upstreams), so
     // this can never shadow a federated tool or be shadowed by one.
     if (selfTools) {
@@ -116,6 +116,27 @@ export function createGatewayServer(
             ? `Tool "${request.params.name}" is available to you but not enabled yet — this server is off by default, so enable what you need on your MCP access page${where}, then reconnect this client.`
             : `Tool "${request.params.name}" is not available to this session — it may not exist, be disabled, or require a higher role than "${principal.roleName}".`;
       return { isError: true, content: [{ type: "text" as const, text }] };
+    }
+    // Network ACL (orthogonal to the role/personal layers): per-REQUEST source
+    // address, carried in by the HTTP layer via authInfo — a session id must
+    // not pin an address any more than it carries privilege. The caller can
+    // already see this tool (allowsFor passed), so naming the restriction
+    // reveals nothing and saves a support round-trip.
+    const callerIp = ((extra?.authInfo?.extra as Record<string, unknown> | undefined)?.ip as string | undefined) ?? null;
+    const blockingAcl = policy.networkDenial(entry, callerIp);
+    if (blockingAcl !== null) {
+      console.error(
+        `[acl] ${principal.label} tools/call ${request.params.name} -> denied from ${callerIp ?? "unknown"} (ACL "${blockingAcl}")`
+      );
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text" as const,
+            text: `Tool "${request.params.name}" cannot be called from your current network — calls of its class are restricted by the gateway's "${blockingAcl}" ACL. Retry from an allowed network, or ask a gateway admin.`,
+          },
+        ],
+      };
     }
     const args = request.params.arguments ?? {};
     console.error(`[mcp] ${principal.label} tools/call ${request.params.name} -> allowed`);

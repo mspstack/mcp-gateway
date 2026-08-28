@@ -96,6 +96,6 @@ describe("migration v4 → v5", () => {
     migrate(db);
     // Bump with every new migration block — the assertion exists so adding one
     // without thinking about the upgrade path fails here first.
-    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(7);
+    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(8);
   });
 });

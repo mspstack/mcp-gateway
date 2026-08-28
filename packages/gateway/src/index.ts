@@ -61,7 +61,10 @@ async function main(): Promise<void> {
   // ── persistence + policy ──
   const db = openDatabase(config.dbPath);
   const repo = new Repo(db);
-  const policy = new PolicyService(repo);
+  if (config.aclEnforcement === false) {
+    console.error("[acl] WARNING: ACL_ENFORCEMENT=off — network ACLs are NOT enforced (break-glass mode)");
+  }
+  const policy = new PolicyService(repo, { aclEnforcement: config.aclEnforcement !== false });
 
   // Config file upstreams are upserted at boot (file wins for the ids it names).
   for (const spec of config.upstreamsFromFile) {

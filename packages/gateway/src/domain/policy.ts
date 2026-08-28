@@ -13,6 +13,7 @@
 
 import type { CatalogEntry, Tier } from "./catalog.js";
 import { derivedGroupOf } from "./catalog.js";
+import { ipInCidrs } from "./net-acl.js";
 import { resolveCeiling, type CeilingReason, type SetMode } from "./toolsets.js";
 import type { Repo, RoleRow } from "../db/repo.js";
 import type { Principal } from "../auth/principal.js";
@@ -54,10 +55,35 @@ export interface Decision {
 }
 
 export class PolicyService {
-  constructor(private readonly repo: Repo) {}
+  constructor(
+    private readonly repo: Repo,
+    /** ACL_ENFORCEMENT=off — break-glass for a lockout; on when omitted. */
+    private readonly opts: { aclEnforcement?: boolean } = {}
+  ) {}
 
   roleFor(roleId: number): RoleRow | null {
     return this.repo.roleById(roleId);
+  }
+
+  /** Admin tier override ?? annotation-derived — the tier every decision uses. */
+  effectiveTierOf(entry: CatalogEntry): Tier {
+    return this.repo.toolSetting(entry.upstreamId, entry.upstreamToolName)?.tierOverride ?? entry.tier;
+  }
+
+  /**
+   * Network layer, orthogonal to the role/personal layers: an ACL bound to the
+   * tool's effective tier must contain the caller's per-REQUEST address.
+   * Returns the blocking ACL's name, or null when the call may proceed. A
+   * missing address with a binding in place denies (fail closed) — tools/list
+   * is deliberately NOT filtered by this (sessions outlive network changes),
+   * so the caller gets a clear call-time error naming a tool they can see.
+   */
+  networkDenial(entry: CatalogEntry, ip: string | null): string | null {
+    if (this.opts.aclEnforcement === false) return null;
+    const acl = this.repo.aclForScope(`tier:${this.effectiveTierOf(entry)}`);
+    if (!acl) return null;
+    if (ip !== null && ipInCidrs(ip, acl.cidrs)) return null;
+    return acl.name;
   }
 
   /** The single authorization decision, used by list filtering AND call-time checks. */
