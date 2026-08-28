@@ -838,6 +838,29 @@ export class Repo {
     return this.db.prepare("UPDATE oauth_clients SET status = ? WHERE client_id = ?").run(status, clientId).changes > 0;
   }
 
+  /**
+   * Delete clients older than `days` that nobody holds a live refresh token
+   * for — MCP clients re-register via DCR at will (Claude does it on most
+   * reconnects), so an old row without tokens is abandoned, not dormant.
+   * Deleting one costs at most a re-login. Returns the removed client ids.
+   */
+  sweepStaleOauthClients(days = 30, now = Date.now()): string[] {
+    const stale = (
+      this.db
+        .prepare(
+          `SELECT client_id FROM oauth_clients
+           WHERE created_at < datetime('now', ?)
+             AND client_id NOT IN (
+               SELECT client_id FROM oauth_refresh_tokens
+               WHERE revoked_at IS NULL AND expires_at > ?
+             )`
+        )
+        .all(`${-days} days`, now) as Array<{ client_id: string }>
+    ).map((row) => row.client_id);
+    for (const clientId of stale) this.deleteOauthClient(clientId);
+    return stale;
+  }
+
   // ── OAuth redirect-URI allowlist (DCR gating) ──
 
   listOauthRedirectPatterns(): OauthRedirectPatternRow[] {
