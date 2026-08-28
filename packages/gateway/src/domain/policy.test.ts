@@ -111,4 +111,55 @@ describe("PolicyService (against a real repo)", () => {
     const { policy } = setup();
     expect(policy.allows(9999, entry("get_doc", "read"))).toBe(false);
   });
+
+  describe("networkDenial (ACL layer)", () => {
+    it("only gates the bound tier, names the blocking ACL, and fails closed on an unknown address", () => {
+      const { repo, policy } = setup();
+      const read = entry("get_doc", "read");
+      const destroy = entry("delete_doc", "destructive");
+
+      // No binding → nothing is gated.
+      expect(policy.networkDenial(destroy, "1.2.3.4")).toBeNull();
+
+      const acl = repo.createAcl("corp", ["10.0.0.0/8"])!;
+      repo.setAclBinding("tier:destructive", acl.id);
+
+      expect(policy.networkDenial(destroy, "10.1.2.3")).toBeNull(); // inside
+      expect(policy.networkDenial(destroy, "1.2.3.4")).toBe("corp"); // outside
+      expect(policy.networkDenial(destroy, null)).toBe("corp"); // unknown → deny
+      expect(policy.networkDenial(read, "1.2.3.4")).toBeNull(); // other tier untouched
+    });
+
+    it("follows the ADMIN tier override, not the annotation-derived tier", () => {
+      const { repo, policy } = setup();
+      const acl = repo.createAcl("corp", ["10.0.0.0/8"])!;
+      repo.setAclBinding("tier:destructive", acl.id);
+      const read = entry("get_doc", "read");
+
+      expect(policy.networkDenial(read, "1.2.3.4")).toBeNull();
+      // An admin re-classified this tool as destructive: the ACL must follow.
+      repo.upsertToolSetting({ upstreamId: "up1", toolName: "get_doc", tierOverride: "destructive" });
+      expect(policy.networkDenial(read, "1.2.3.4")).toBe("corp");
+    });
+
+    it("ACL_ENFORCEMENT=off disables the layer entirely (break-glass)", () => {
+      const repo = new Repo(openDatabase(":memory:"));
+      const policy = new PolicyService(repo, { aclEnforcement: false });
+      const acl = repo.createAcl("corp", ["10.0.0.0/8"])!;
+      repo.setAclBinding("tier:destructive", acl.id);
+      expect(policy.networkDenial(entry("delete_doc", "destructive"), "1.2.3.4")).toBeNull();
+    });
+
+    it("deleting an ACL cascades its bindings, reopening the scope", () => {
+      const { repo, policy } = setup();
+      const acl = repo.createAcl("corp", ["10.0.0.0/8"])!;
+      repo.setAclBinding("tier:destructive", acl.id);
+      const destroy = entry("delete_doc", "destructive");
+      expect(policy.networkDenial(destroy, "1.2.3.4")).toBe("corp");
+
+      repo.deleteAcl(acl.id);
+      expect(repo.listAclBindings()["tier:destructive"]).toBeUndefined();
+      expect(policy.networkDenial(destroy, "1.2.3.4")).toBeNull();
+    });
+  });
 });

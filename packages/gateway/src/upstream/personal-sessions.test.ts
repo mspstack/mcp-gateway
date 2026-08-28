@@ -311,3 +311,57 @@ describe("identityHeaders (service-account upstreams)", () => {
     repo.deleteUserCredential("static:alice", "ident", "x-actor");
   });
 });
+
+describe("network ACLs (tier + browser surfaces)", () => {
+  it("an ACL bound to the tool's tier blocks the call per-request, names itself, and unbinding reopens", async () => {
+    // "who" is readOnlyHint → tier read. Bind read to a lab-only ACL: the test
+    // client comes from loopback, which is outside it → denied with the ACL named.
+    const acl = repo.createAcl("lab-only", ["10.0.0.0/8"])!;
+    repo.setAclBinding("tier:read", acl.id);
+    try {
+      const denied = await callTool("tok-alice", "peruser_who");
+      expect(denied).toMatch(/cannot be called from your current network/);
+      expect(denied).toMatch(/"lab-only"/);
+
+      // Widen the ACL to loopback (v4 + v6 — the test socket may be either) →
+      // the same session's next call passes: the check is per-request, and a
+      // session id pins no address.
+      repo.updateAcl(acl.id, { cidrs: ["127.0.0.0/8", "::1/128"] });
+      expect(await callTool("tok-alice", "peruser_who")).toMatch(/^who via /);
+
+      // Back to blocking, then unbind — the scope opens again.
+      repo.updateAcl(acl.id, { cidrs: ["10.0.0.0/8"] });
+      expect(await callTool("tok-alice", "peruser_who")).toMatch(/cannot be called/);
+      repo.setAclBinding("tier:read", null);
+      expect(await callTool("tok-alice", "peruser_who")).toMatch(/^who via /);
+    } finally {
+      repo.setAclBinding("tier:read", null);
+      repo.deleteAcl(acl.id);
+    }
+  });
+
+  it("surface:browser locks /api (and friends) to the ACL; machine endpoints stay open", async () => {
+    const acl = repo.createAcl("corp", ["10.0.0.0/8"])!;
+    repo.setAclBinding("surface:browser", acl.id);
+    try {
+      const blocked = await fetch(`${base}/api/me/access`, {
+        headers: { Authorization: "Bearer tok-alice" },
+      });
+      expect(blocked.status).toBe(403);
+      expect(await blocked.text()).toMatch(/"corp" ACL/);
+
+      // /mcp is a machine endpoint — same source address still works.
+      expect(await callTool("tok-alice", "peruser_who")).toMatch(/^who via /);
+
+      // Loopback added → the browser surface opens for this client.
+      repo.updateAcl(acl.id, { cidrs: ["127.0.0.0/8", "::1/128"] });
+      const allowed = await fetch(`${base}/api/me/access`, {
+        headers: { Authorization: "Bearer tok-alice" },
+      });
+      expect(allowed.status).toBe(200);
+    } finally {
+      repo.setAclBinding("surface:browser", null);
+      repo.deleteAcl(acl.id);
+    }
+  });
+});

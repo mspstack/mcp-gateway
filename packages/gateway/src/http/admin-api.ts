@@ -11,6 +11,8 @@ import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import { ConfigError, parseUpstreamSpec } from "../config.js";
 import { isMaxTier } from "../domain/policy.js";
+import { isValidCidr } from "../domain/net-acl.js";
+import { ACL_SCOPES, isAclScope } from "../db/repo.js";
 import { derivedGroupOf } from "../domain/catalog.js";
 import { resolveToolTargets } from "../domain/tool-targets.js";
 import { listSnapshots, runBackup } from "../db/backup.js";
@@ -554,6 +556,108 @@ export function createAdminRouter(deps: AppDeps, admin: AdminDeps): Router {
         return;
       }
       res.json({ ok: true });
+    })
+  );
+
+  // ── Network ACLs (named CIDR lists + scope bindings) ──
+  // tools/list is not filtered by these; the tool-call boundary and the
+  // browser-surface middleware are (per-request source address).
+
+  const parseCidrsBody = (body: unknown): string[] | null => {
+    const raw = (body as Record<string, unknown>)?.cidrs;
+    if (!Array.isArray(raw) || raw.length === 0 || !raw.every((c) => typeof c === "string")) return null;
+    const cidrs = (raw as string[]).map((c) => c.trim()).filter(Boolean);
+    return cidrs.length > 0 && cidrs.every(isValidCidr) ? cidrs : null;
+  };
+
+  router.get(
+    "/acls",
+    h((_req, res) => {
+      res.json({ acls: repo.listAcls(), bindings: repo.listAclBindings(), enforcement: deps.config.aclEnforcement !== false });
+    })
+  );
+
+  router.post(
+    "/acls",
+    h((req, res) => {
+      const name = typeof (req.body as Record<string, unknown>)?.name === "string"
+        ? ((req.body as Record<string, unknown>).name as string).trim()
+        : "";
+      const cidrs = parseCidrsBody(req.body);
+      if (!name || name.length > 100 || !cidrs) {
+        res.status(400).json({ error: "name and a non-empty list of valid IPs/CIDRs are required" });
+        return;
+      }
+      const acl = repo.createAcl(name, cidrs);
+      if (!acl) {
+        res.status(409).json({ error: "an ACL with that name already exists" });
+        return;
+      }
+      res.status(201).json(acl);
+    })
+  );
+
+  router.put(
+    "/acls/:id",
+    h((req, res) => {
+      const id = Number(param(req, "id"));
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const patch: { name?: string; cidrs?: string[] } = {};
+      if (body.name !== undefined) {
+        if (typeof body.name !== "string" || !body.name.trim() || body.name.length > 100) {
+          res.status(400).json({ error: "invalid name" });
+          return;
+        }
+        patch.name = body.name.trim();
+      }
+      if (body.cidrs !== undefined) {
+        const cidrs = parseCidrsBody(body);
+        if (!cidrs) {
+          res.status(400).json({ error: "cidrs must be a non-empty list of valid IPs/CIDRs" });
+          return;
+        }
+        patch.cidrs = cidrs;
+      }
+      if (!Number.isInteger(id) || !repo.updateAcl(id, patch)) {
+        res.status(404).json({ error: "Unknown ACL" });
+        return;
+      }
+      console.error(`[acl] admin updated ACL ${id}`);
+      res.json(repo.aclById(id));
+    })
+  );
+
+  router.delete(
+    "/acls/:id",
+    h((req, res) => {
+      const id = Number(param(req, "id"));
+      const acl = Number.isInteger(id) ? repo.aclById(id) : null;
+      if (!acl || !repo.deleteAcl(id)) {
+        res.status(404).json({ error: "Unknown ACL" });
+        return;
+      }
+      // Bindings cascade — the scopes this ACL guarded are now OPEN.
+      console.error(`[acl] admin deleted ACL "${acl.name}" — any scopes it guarded are now unrestricted`);
+      res.json({ ok: true });
+    })
+  );
+
+  router.put(
+    "/acl-bindings",
+    h((req, res) => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const scope = body.scope;
+      const aclId = body.aclId;
+      if (!isAclScope(scope) || (aclId !== null && typeof aclId !== "number")) {
+        res.status(400).json({ error: `scope must be one of ${ACL_SCOPES.join(", ")}; aclId a number or null` });
+        return;
+      }
+      if (!repo.setAclBinding(scope, aclId as number | null)) {
+        res.status(404).json({ error: "Unknown ACL" });
+        return;
+      }
+      console.error(`[acl] admin ${aclId === null ? "unbound" : `bound ACL ${aclId} to`} ${scope}`);
+      res.json({ ok: true, bindings: repo.listAclBindings() });
     })
   );
 

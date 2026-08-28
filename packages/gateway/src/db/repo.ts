@@ -71,6 +71,19 @@ export interface OauthRedirectPatternRow {
   createdAt: string;
 }
 
+export type AclScope = "tier:read" | "tier:write" | "tier:destructive" | "surface:browser";
+
+export const ACL_SCOPES: readonly AclScope[] = ["tier:read", "tier:write", "tier:destructive", "surface:browser"];
+
+export const isAclScope = (value: unknown): value is AclScope => ACL_SCOPES.includes(value as AclScope);
+
+export interface AclRow {
+  id: number;
+  name: string;
+  cidrs: string[];
+  createdAt: string;
+}
+
 /** A DCR client plus the people currently holding live refresh tokens for it. */
 export interface OauthClientWithUsers extends OauthClientRow {
   users: string[];
@@ -886,6 +899,84 @@ export class Repo {
     return this.db.prepare("DELETE FROM oauth_redirect_allowlist WHERE id = ?").run(id).changes > 0;
   }
 
+  // ── Network ACLs (named CIDR lists + scope bindings) ──
+
+  listAcls(): AclRow[] {
+    return (
+      this.db.prepare("SELECT id, name, cidrs_json, created_at FROM acls ORDER BY name").all() as Array<
+        Record<string, unknown>
+      >
+    ).map(mapAcl);
+  }
+
+  /** Returns null when the name is already taken. */
+  createAcl(name: string, cidrs: string[]): AclRow | null {
+    try {
+      const id = this.db.prepare("INSERT INTO acls (name, cidrs_json) VALUES (?, ?)").run(name, JSON.stringify(cidrs))
+        .lastInsertRowid as number;
+      return this.aclById(Number(id));
+    } catch {
+      return null; // UNIQUE(name)
+    }
+  }
+
+  aclById(id: number): AclRow | null {
+    const row = this.db.prepare("SELECT id, name, cidrs_json, created_at FROM acls WHERE id = ?").get(id) as
+      | Record<string, unknown>
+      | undefined;
+    return row ? mapAcl(row) : null;
+  }
+
+  updateAcl(id: number, patch: { name?: string; cidrs?: string[] }): boolean {
+    const existing = this.aclById(id);
+    if (!existing) return false;
+    return (
+      this.db
+        .prepare("UPDATE acls SET name = ?, cidrs_json = ? WHERE id = ?")
+        .run(patch.name ?? existing.name, JSON.stringify(patch.cidrs ?? existing.cidrs), id).changes > 0
+    );
+  }
+
+  /** Deleting an ACL cascades its bindings — those scopes become unrestricted. */
+  deleteAcl(id: number): boolean {
+    return this.db.prepare("DELETE FROM acls WHERE id = ?").run(id).changes > 0;
+  }
+
+  /** scope → aclId for every bound scope. */
+  listAclBindings(): Partial<Record<AclScope, number>> {
+    const rows = this.db.prepare("SELECT scope, acl_id FROM acl_bindings").all() as Array<{
+      scope: AclScope;
+      acl_id: number;
+    }>;
+    return Object.fromEntries(rows.map((r) => [r.scope, r.acl_id]));
+  }
+
+  /** aclId = null unbinds the scope (no network restriction). */
+  setAclBinding(scope: AclScope, aclId: number | null): boolean {
+    if (aclId === null) {
+      this.db.prepare("DELETE FROM acl_bindings WHERE scope = ?").run(scope);
+      return true;
+    }
+    if (!this.aclById(aclId)) return false;
+    this.db
+      .prepare(
+        "INSERT INTO acl_bindings (scope, acl_id) VALUES (?, ?) ON CONFLICT(scope) DO UPDATE SET acl_id = excluded.acl_id"
+      )
+      .run(scope, aclId);
+    return true;
+  }
+
+  /** The ACL bound to a scope, or null when the scope is unrestricted. */
+  aclForScope(scope: AclScope): AclRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT a.id, a.name, a.cidrs_json, a.created_at FROM acl_bindings b
+         JOIN acls a ON a.id = b.acl_id WHERE b.scope = ?`
+      )
+      .get(scope) as Record<string, unknown> | undefined;
+    return row ? mapAcl(row) : null;
+  }
+
   /**
    * Persist a new authorization code by its HASH (plaintext codes never touch
    * the DB) and opportunistically sweep codes past their TTL.
@@ -1098,6 +1189,13 @@ const mapUserPref = (row: Record<string, unknown>): UserPrefRow => ({
   upstreamId: row.upstream_id as string,
   toolName: row.tool_name as string,
   enabled: row.enabled === 1,
+});
+
+const mapAcl = (row: Record<string, unknown>): AclRow => ({
+  id: row.id as number,
+  name: row.name as string,
+  cidrs: JSON.parse(row.cidrs_json as string) as string[],
+  createdAt: row.created_at as string,
 });
 
 const mapOauthClient = (row: Record<string, unknown>): OauthClientRow => ({

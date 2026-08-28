@@ -319,4 +319,28 @@ export function migrate(db: DatabaseSync): void {
 
     db.exec("PRAGMA user_version = 7");
   }
+
+  if (version < 8) {
+    // Network ACLs: named CIDR lists bound to a scope — a tool tier (the
+    // effective tier, admin override included) or the browser surfaces
+    // (/admin, /me, /api, login, /oauth/authorize). No bindings = no
+    // network layer, today's behaviour byte-for-byte. Deleting an ACL
+    // cascades its bindings, which OPENS those scopes — the admin UI warns.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS acls (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        cidrs_json TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE IF NOT EXISTS acl_bindings (
+        scope TEXT PRIMARY KEY
+          CHECK (scope IN ('tier:read','tier:write','tier:destructive','surface:browser')),
+        acl_id INTEGER NOT NULL REFERENCES acls(id) ON DELETE CASCADE
+      );
+    `);
+
+    db.exec("PRAGMA user_version = 8");
+  }
 }

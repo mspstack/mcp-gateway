@@ -580,8 +580,16 @@ async function renderTools() {
 // ── Roles ──
 async function renderRoles() {
   const el = $("#tab-roles");
-  const [{ roles, grants }, upstreams] = await Promise.all([api("/roles"), api("/upstreams")]);
+  const [{ roles, grants }, upstreams, aclData] = await Promise.all([api("/roles"), api("/upstreams"), api("/acls")]);
   const grantFor = (r, u) => (grants.find(g => g.roleId === r && g.upstreamId === u) || {}).maxTier || "";
+  const aclScopes = [
+    ["tier:destructive", "Destructive tools"],
+    ["tier:write", "Write tools"],
+    ["tier:read", "Read tools"],
+    ["surface:browser", "Browser surfaces (/admin, /me, /api, sign-in)"],
+  ];
+  const aclOpts = (sel) => `<option value="">(no restriction)</option>` +
+    aclData.acls.map(a => `<option value="${a.id}" ${sel===a.id?"selected":""}>${esc(a.name)}</option>`).join("");
   el.innerHTML = `
     <section class="panel"><h2>Roles × upstream access (max tier)</h2>
       <table>
@@ -606,19 +614,80 @@ async function renderRoles() {
         <button class="btn" id="role-add">Create</button>
       </div>
       <p class="muted">Per-tool allow/deny overrides for a role are set from the Tools data via the API (<code>PUT /api/overrides</code>).</p>
+    </section>
+    <section class="panel"><h2>Network ACLs</h2>
+      <p class="muted">Named IP/CIDR lists, enforced per request. A binding on a tool class blocks
+        <em>calls</em> of that (effective) tier from outside the list — tools stay visible in
+        tools/list, the call gets a clear error. The browser-surface binding locks /admin, /me,
+        /api, sign-in and /oauth/authorize; the machine endpoints (/mcp, token, register) are
+        never restricted — MCP vendors call them from unpredictable addresses.
+        ${aclData.enforcement ? "" : '<b style="color:var(--err)">Enforcement is OFF (ACL_ENFORCEMENT=off)</b>.'}</p>
+      ${aclData.acls.length ? `<table>
+        <tr><th>Name</th><th>IPs / CIDRs</th><th></th></tr>
+        ${aclData.acls.map(a => `<tr>
+          <td>${esc(a.name)}</td>
+          <td class="mono"><input data-acl-cidrs="${a.id}" value="${esc(a.cidrs.join(", "))}" style="width:100%"></td>
+          <td style="white-space:nowrap"><button class="btn" data-acl-save="${a.id}">Save</button>
+            <button class="btn danger" data-acl-del="${a.id}" data-acl-del-name="${esc(a.name)}">Delete</button></td>
+        </tr>`).join("")}</table>` : '<p class="muted">No ACLs yet.</p>'}
+      <div class="row" style="margin-top:8px">
+        <label>Name <input id="acl-name" placeholder="corp-networks"></label>
+        <label style="flex:2">IPs / CIDRs (comma-separated) <input id="acl-cidrs" placeholder="52.224.29.136/32, 172.30.0.0/16" style="width:100%"></label>
+        <button class="btn" id="acl-add">Create</button>
+      </div>
+      <h3 style="margin:16px 0 4px">Bindings</h3>
+      <table>
+        ${aclScopes.map(([scope, label]) => `<tr>
+          <td>${label}</td>
+          <td><select data-acl-bind="${scope}">${aclOpts(aclData.bindings[scope])}</select></td>
+        </tr>`).join("")}
+      </table>
+      <p class="cellsub" style="margin:6px 0 0">Break-glass if you lock yourself out: app setting
+        <code>ACL_ENFORCEMENT=off</code> + restart.</p>
     </section>`;
   el.onchange = async (ev) => {
-    const s = ev.target; if (s.dataset.r === undefined) return;
+    const s = ev.target;
+    if (s.dataset.aclBind !== undefined) {
+      try {
+        await api("/acl-bindings", { method: "PUT", body: JSON.stringify({ scope: s.dataset.aclBind, aclId: s.value ? Number(s.value) : null }) });
+        toast(s.value ? "Bound" : "Unbound — scope is now unrestricted");
+      } catch (e) { toast(e.message, true); }
+      return;
+    }
+    if (s.dataset.r === undefined) return;
     try {
       await api("/grants", { method: "PUT", body: JSON.stringify({ roleId: Number(s.dataset.r), upstreamId: s.dataset.u, maxTier: s.value || null }) });
       toast("Saved");
     } catch (e) { toast(e.message, true); }
   };
   el.onclick = async (ev) => {
+    const save = ev.target.closest("[data-acl-save]");
+    if (save) {
+      const cidrs = $(`[data-acl-cidrs="${save.dataset.aclSave}"]`).value.split(",").map(x => x.trim()).filter(Boolean);
+      try { await api("/acls/" + save.dataset.aclSave, { method: "PUT", body: JSON.stringify({ cidrs }) }); toast("Saved"); renderRoles(); }
+      catch (e) { toast(e.message, true); }
+      return;
+    }
+    const del = ev.target.closest("[data-acl-del]");
+    if (del) {
+      if (!confirm(`Delete ACL "${del.dataset.aclDelName}"?
+
+Any tool classes or browser surfaces it guards become UNRESTRICTED immediately.`)) return;
+      try { await api("/acls/" + del.dataset.aclDel, { method: "DELETE" }); renderRoles(); }
+      catch (e) { toast(e.message, true); }
+      return;
+    }
     const b = ev.target.closest("[data-del-role]"); if (!b) return;
     if (!confirm("Delete this role?")) return;
     try { await api("/roles/" + b.dataset.delRole, { method: "DELETE" }); renderRoles(); }
     catch (e) { toast(e.message, true); }
+  };
+  $("#acl-add").onclick = async () => {
+    const cidrs = $("#acl-cidrs").value.split(",").map(x => x.trim()).filter(Boolean);
+    try {
+      await api("/acls", { method: "POST", body: JSON.stringify({ name: $("#acl-name").value.trim(), cidrs }) });
+      renderRoles();
+    } catch (e) { toast(e.message, true); }
   };
   $("#role-add").onclick = async () => {
     try {

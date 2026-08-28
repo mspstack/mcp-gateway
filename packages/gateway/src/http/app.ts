@@ -20,7 +20,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import express, { type Request, type Response } from "express";
+import express, { type NextFunction, type Request, type Response } from "express";
 import { decodeJwt } from "jose";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
@@ -30,6 +30,7 @@ import type { DatabaseSync } from "node:sqlite";
 import type { Repo, RoleRow, UserRow } from "../db/repo.js";
 import type { BackupUploader } from "../db/backup.js";
 import type { PolicyService } from "../domain/policy.js";
+import { clientIpFrom, ipInCidrs } from "../domain/net-acl.js";
 import type { UpstreamManager } from "../upstream/manager.js";
 import type { SecretStore } from "../secrets/store.js";
 import type { OidcVerifier, OidcIdentity } from "../auth/oidc.js";
@@ -355,6 +356,36 @@ export function createApp(deps: AppDeps): express.Express {
   const resolveAuth = createAuthResolver(deps);
   const sessions = new Map<string, SessionRecord>();
 
+  // ── Network ACLs ──────────────────────────────────────────────
+  // The machine endpoints (/mcp, /oauth/register, /oauth/token, /.well-known)
+  // stay reachable from anywhere — MCP connectors call them from vendor
+  // infrastructure with unpredictable addresses, and they carry their own
+  // auth. Everything a human drives from a browser can be pinned to known
+  // networks with an ACL bound to surface:browser; tool calls are gated
+  // per-request inside the MCP handler via the same repo (tier:* scopes).
+  const requestIp = (req: Request): string | null =>
+    clientIpFrom(req.headers["x-forwarded-for"], req.socket?.remoteAddress ?? null, config.trustProxy === true);
+  const browserSurfaceAcl = (req: Request, res: Response, next: NextFunction): void => {
+    if (config.aclEnforcement === false) return next();
+    const acl = deps.repo.aclForScope("surface:browser");
+    if (!acl) return next();
+    const ip = requestIp(req);
+    if (ip !== null && ipInCidrs(ip, acl.cidrs)) return next();
+    console.error(
+      `[acl] blocked ${req.method} ${req.originalUrl} from ${ip ?? "unknown"} (surface:browser, ACL "${acl.name}")`
+    );
+    res.status(403).send(`Forbidden: this network is not allowed by the gateway's "${acl.name}" ACL.`);
+  };
+  for (const surface of ["/admin", "/me", "/api", "/auth/login", "/auth/callback", "/oauth/authorize"]) {
+    app.use(surface, browserSurfaceAcl);
+  }
+
+  /** Per-request source address for the MCP tool-call ACL, riding the SDK's authInfo channel. */
+  const attachCallContext = (req: Request): void => {
+    (req as Request & { auth?: { token: string; clientId: string; scopes: string[]; extra: Record<string, unknown> } }).auth =
+      { token: "", clientId: "", scopes: [], extra: { ip: requestIp(req) } };
+  };
+
   // Per PRINCIPAL, not per role: a user's own /me switches change their list
   // without touching the role envelope, so a role-level fingerprint would see
   // no diff and skip the notification (the list itself is allowsFor-filtered).
@@ -480,6 +511,7 @@ export function createApp(deps: AppDeps): express.Express {
         if (principalKey(session.principal) !== principalKey(auth.principal)) {
           return rpcError(res, 403, -32003, "Forbidden: credentials do not match this session");
         }
+        attachCallContext(req);
         await session.transport.handleRequest(req, res, req.body);
         return;
       }
@@ -552,6 +584,7 @@ export function createApp(deps: AppDeps): express.Express {
       };
 
       await server.connect(transport);
+      attachCallContext(req);
       await transport.handleRequest(req, res, req.body);
     })().catch((err) => {
       console.error(`[http] POST /mcp failed: ${String(err)}`);
