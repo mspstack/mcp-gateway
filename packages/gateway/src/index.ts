@@ -59,7 +59,7 @@ async function main(): Promise<void> {
   }
 
   // ── persistence + policy ──
-  const db = openDatabase(config.dbPath);
+  const db = openDatabase(config.dbPath, { openTimeoutMs: config.dbOpenTimeoutMs });
   const repo = new Repo(db);
   if (config.aclEnforcement === false) {
     console.error("[acl] WARNING: ACL_ENFORCEMENT=off — network ACLs are NOT enforced (break-glass mode)");
