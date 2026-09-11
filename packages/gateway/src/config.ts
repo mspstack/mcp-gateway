@@ -42,6 +42,7 @@ import { readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { DB_OPEN_TIMEOUT_MS } from "./db/index.js";
 
 export class ConfigError extends Error {}
 
@@ -233,6 +234,13 @@ export interface GatewayConfig {
   publicUrl: string;
   configPath: string;
   dbPath: string;
+  /**
+   * How long a boot keeps retrying a database file it cannot open yet
+   * (`DB_OPEN_TIMEOUT_MS`, default 120s). Covers the window where a replaced
+   * container still holds the file on a shared mount; `0` restores the old
+   * fail-on-first-error behaviour.
+   */
+  dbOpenTimeoutMs: number;
   /**
    * Expose the admin-only self-management tools (`gw_*`) over MCP. On by
    * default; `GATEWAY_SELF_TOOLS=off` keeps conversational administration out
@@ -555,6 +563,12 @@ export function loadConfig(
     }
   }
 
+  const dbOpenTimeoutRaw = cleanEnv(env.DB_OPEN_TIMEOUT_MS) ?? String(DB_OPEN_TIMEOUT_MS);
+  const dbOpenTimeoutMs = Number(dbOpenTimeoutRaw);
+  if (!Number.isFinite(dbOpenTimeoutMs) || dbOpenTimeoutMs < 0) {
+    throw new ConfigError(`DB_OPEN_TIMEOUT_MS must be a non-negative number, got "${dbOpenTimeoutRaw}"`);
+  }
+
   // ── backups ──
   const backupIntervalRaw = cleanEnv(env.BACKUP_INTERVAL_HOURS) ?? "24";
   const backupIntervalHours = Number(backupIntervalRaw);
@@ -577,6 +591,7 @@ export function loadConfig(
     publicUrl,
     configPath,
     dbPath,
+    dbOpenTimeoutMs,
     selfTools: (cleanEnv(env.GATEWAY_SELF_TOOLS) ?? "on").toLowerCase() !== "off",
     backup: {
       dir: cleanEnv(env.BACKUP_DIR) ?? `${dirname(dbPath)}/backups`,

@@ -7,11 +7,78 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-export function openDatabase(path: string): DatabaseSync {
-  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+/** Default window for retrying a database file that is momentarily unavailable. */
+export const DB_OPEN_TIMEOUT_MS = 120_000;
+
+export interface OpenDatabaseOptions {
+  /**
+   * How long to keep retrying the open before giving up. On App Service the
+   * outgoing container can still hold the file on the shared /home mount while
+   * the replacement boots — a single failed open used to be fatal, so a
+   * routine container swap could drop the site into a crash loop until the
+   * platform happened to retry late enough.
+   */
+  openTimeoutMs?: number;
+  /** Test seam: the raw connect attempt. */
+  connect?: (path: string) => DatabaseSync;
+  /** Test seam: synchronous sleep. */
+  sleep?: (ms: number) => void;
+}
+
+/** Block the boot thread — openDatabase is sync and runs before anything else. */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function connectWithPragmas(path: string): DatabaseSync {
   const db = new DatabaseSync(path);
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA foreign_keys = ON");
+  try {
+    // Inside the retry too: on a contended file these fail as well, and a
+    // half-open handle must not leak into the next attempt.
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec("PRAGMA foreign_keys = ON");
+  } catch (err) {
+    try {
+      db.close();
+    } catch {
+      // already unusable — the original error is the one worth reporting
+    }
+    throw err;
+  }
+  return db;
+}
+
+/**
+ * Open the file, retrying with backoff until the deadline. Migrations stay
+ * OUTSIDE this loop: a failing migration is never transient, and re-running
+ * one is not something to do on a timer.
+ */
+export function openWithRetry(path: string, options: OpenDatabaseOptions = {}): DatabaseSync {
+  const connect = options.connect ?? connectWithPragmas;
+  const sleep = options.sleep ?? sleepSync;
+  // An in-memory database has nothing to contend over, so a failure there is
+  // real — never spend the retry window on it.
+  const budget = path === ":memory:" ? 0 : (options.openTimeoutMs ?? DB_OPEN_TIMEOUT_MS);
+  const deadline = Date.now() + budget;
+
+  let delay = 250;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const db = connect(path);
+      if (attempt > 1) console.error(`[db] opened ${path} on attempt ${attempt}`);
+      return db;
+    } catch (err) {
+      if (Date.now() >= deadline) throw err;
+      console.error(`[db] cannot open ${path} yet (${String(err)}) — retrying in ${delay}ms`);
+      sleep(delay);
+      delay = Math.min(delay * 2, 5_000);
+    }
+  }
+}
+
+export function openDatabase(path: string, options: OpenDatabaseOptions = {}): DatabaseSync {
+  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+  const db = openWithRetry(path, options);
   migrate(db);
   return db;
 }
