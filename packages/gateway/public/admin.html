@@ -253,6 +253,17 @@ async function renderUpstreams() {
           <textarea id="add-inject" rows="3" style="width:100%" placeholder="Authorization: Bearer bao:upstreams/itglue#token"></textarea></label>
       </div>
       <div class="row">
+        <label title="Each user gets their own connection; the values they register on /me replace the shared headers/env of the same name">
+          <input type="checkbox" id="add-peruser"> Per-user credentials</label>
+        <label class="hidden" id="add-require-wrap" title="Callers without their own credentials are refused instead of falling back to the shared values above">
+          <input type="checkbox" id="add-require"> Require personal credentials</label>
+      </div>
+      <div class="row hidden" id="add-personal-wrap">
+        <label style="flex:1">Fields users can set on /me — one per line, <code>Name | Label | flags | help</code>; flags: <code>secret</code>, <code>optional</code>.
+          Keep a working shared value above for tool discovery.
+          <textarea id="add-personal" rows="3" style="width:100%" placeholder="x-api-key | Acme API key | secret"></textarea></label>
+      </div>
+      <div class="row">
         <button class="btn secondary" id="add-test">Test connection</button>
         <button class="btn" id="add-save">Add server</button>
         <span class="muted" id="add-result"></span>
@@ -270,6 +281,20 @@ async function renderUpstreams() {
     $("#add-npm").classList.toggle("hidden", t !== "npm");
     $("#add-docker").classList.toggle("hidden", t !== "docker");
   };
+  $("#add-peruser").onchange = () => {
+    const on = $("#add-peruser").checked;
+    $("#add-require-wrap").classList.toggle("hidden", !on);
+    $("#add-personal-wrap").classList.toggle("hidden", !on);
+  };
+
+  // "Name | Label | secret,optional | help" → personalCredentials entries (server re-validates).
+  const parsePersonal = () => $("#add-personal").value.split("\n").map(l => l.trim()).filter(Boolean).map(l => {
+    const [field, label, flags = "", ...help] = l.split("|").map(s => s.trim());
+    const f = flags.toLowerCase().split(/[\s,]+/);
+    const entry = { field, label: label || field, secret: f.includes("secret"), optional: f.includes("optional") };
+    if (help.length && help.join("")) entry.help = help.join(" | ");
+    return entry;
+  });
 
   const buildSpec = () => {
     const t = $("#add-type").value;
@@ -279,16 +304,23 @@ async function renderUpstreams() {
     $("#add-inject").value.split("\n").map(l => l.trim()).filter(Boolean).forEach(l => {
       const i = l.indexOf(":"); if (i > 0) inject[l.slice(0, i).trim()] = l.slice(i + 1).trim();
     });
-    if (t === "http") return { id, namespace, transport: "http", url: $("#add-url").value.trim(), headers: inject, userDefault };
+    const perUser = $("#add-peruser").checked;
+    const personal = perUser ? parsePersonal() : [];
+    const extra = perUser
+      ? { sessionMode: "per-user", requirePersonalCredentials: $("#add-require").checked,
+          ...(personal.length ? { personalCredentials: personal } : {}) }
+      : {};
+    if (t === "http") return { id, namespace, transport: "http", url: $("#add-url").value.trim(), headers: inject, userDefault, ...extra };
     if (t === "npm") {
       const pkg = $("#add-pkg").value.trim(), ver = $("#add-ver").value.trim() || "latest";
-      return { id, namespace, transport: "stdio", command: "npx", args: ["-y", `${pkg}@${ver}`], env: inject, userDefault };
+      return { id, namespace, transport: "stdio", command: "npx", args: ["-y", `${pkg}@${ver}`], env: inject, userDefault, ...extra };
     }
     const img = $("#add-img").value.trim();
     const args = ["run", "-i", "--rm"];
-    Object.keys(inject).forEach(k => args.push("-e", k)); // value stays in spawn env, not argv
+    // value stays in spawn env, not argv; personal fields need their -e too or docker drops them
+    new Set([...Object.keys(inject), ...personal.map(p => p.field)]).forEach(k => args.push("-e", k));
     args.push(img);
-    return { id, namespace, transport: "stdio", command: "docker", args, env: inject, userDefault };
+    return { id, namespace, transport: "stdio", command: "docker", args, env: inject, userDefault, ...extra };
   };
 
   // ── presets ──
