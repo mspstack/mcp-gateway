@@ -277,6 +277,18 @@ export interface GatewayConfig {
    */
   trustProxy?: boolean;
   /**
+   * Live MCP sessions idle (no request, no open notification stream) longer
+   * than this are closed (`SESSION_IDLE_TIMEOUT_MIN`, default 30; `0` = never).
+   * Clients that never send DELETE otherwise pile up until a restart, and every
+   * policy change walks them all.
+   */
+  sessionIdleTimeoutMs?: number;
+  /**
+   * Cap on live sessions per principal (`MAX_SESSIONS_PER_PRINCIPAL`, default
+   * 25; `0` = unlimited); the least recently used one is closed to make room.
+   */
+  maxSessionsPerPrincipal?: number;
+  /**
    * Network ACL enforcement master switch. ACL_ENFORCEMENT=off is the
    * break-glass for locking yourself out of the admin UI with a bad ACL
    * (needs an app-settings change + restart, loudly logged at boot).
@@ -569,6 +581,17 @@ export function loadConfig(
     throw new ConfigError(`DB_OPEN_TIMEOUT_MS must be a non-negative number, got "${dbOpenTimeoutRaw}"`);
   }
 
+  const nonNegative = (name: string, fallback: string): number => {
+    const raw = cleanEnv(env[name]) ?? fallback;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 0) {
+      throw new ConfigError(`${name} must be a non-negative number, got "${raw}"`);
+    }
+    return value;
+  };
+  const sessionIdleTimeoutMs = nonNegative("SESSION_IDLE_TIMEOUT_MIN", "30") * 60_000;
+  const maxSessionsPerPrincipal = Math.floor(nonNegative("MAX_SESSIONS_PER_PRINCIPAL", "25"));
+
   // ── backups ──
   const backupIntervalRaw = cleanEnv(env.BACKUP_INTERVAL_HOURS) ?? "24";
   const backupIntervalHours = Number(backupIntervalRaw);
@@ -614,6 +637,8 @@ export function loadConfig(
     bao,
     keyVault,
     trustProxy: (cleanEnv(env.TRUST_PROXY) ?? "").toLowerCase() === "true",
+    sessionIdleTimeoutMs,
+    maxSessionsPerPrincipal,
     aclEnforcement: (cleanEnv(env.ACL_ENFORCEMENT) ?? "on").toLowerCase() !== "off",
   };
 }

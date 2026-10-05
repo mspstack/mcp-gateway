@@ -301,9 +301,15 @@ export interface GatewayTokenClaims {
 export async function mintAccessToken(
   claims: GatewayTokenClaims,
   publicUrl: string,
-  jwtSecret: string
+  jwtSecret: string,
+  /**
+   * The OAuth client the token was issued to (RFC 9068 `client_id`). Purely
+   * diagnostic — it lets the session log say WHICH registered connector opened
+   * a session; authorization never reads it.
+   */
+  clientId?: string
 ): Promise<string> {
-  return new SignJWT({})
+  return new SignJWT(clientId ? { client_id: clientId } : {})
     .setProtectedHeader({ alg: "HS256" })
     .setIssuer(publicUrl)
     .setAudience(canonicalResource(publicUrl))

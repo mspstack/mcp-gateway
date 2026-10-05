@@ -54,6 +54,13 @@ export interface UpstreamSummary {
  */
 const PERSONAL_KEY_SEP = "\u0000";
 
+/**
+ * Per-upstream budget for connect + tools/list during a catalog refresh. One
+ * slow or hung upstream used to hold every admin toggle (they all await a
+ * refresh) for as long as its transport cared to wait.
+ */
+export const DISCOVERY_TIMEOUT_MS = 20_000;
+
 const failure = (text: string): CallToolResult => ({
   isError: true,
   content: [{ type: "text", text }],
@@ -66,6 +73,8 @@ export class UpstreamManager {
   private readonly specs = new Map<string, UpstreamSpec>();
   private catalog = new Map<string, CatalogEntry>();
   private refreshing: Promise<void> | null = null;
+  /** A second pass requested while one was running — see refreshCatalog(). */
+  private refreshQueued: Promise<void> | null = null;
   /**
    * Why an upstream contributed no tools on the last refresh. Discovery can
    * fail while the transport still reports connected, and then `connected: true,
@@ -168,28 +177,61 @@ export class UpstreamManager {
       this.refreshing = this.doRefresh().finally(() => {
         this.refreshing = null;
       });
+      return this.refreshing;
     }
-    return this.refreshing;
+    // A pass is already running, but it started before whatever change brought
+    // us here (an upstream just disabled, added, replaced) — joining it would
+    // hand back a catalog that still reflects the old state. Queue ONE more
+    // pass after it; any number of callers arriving meanwhile share that one.
+    if (!this.refreshQueued) {
+      this.refreshQueued = this.refreshing.then(() => {
+        this.refreshQueued = null;
+        return this.refreshCatalog();
+      });
+    }
+    return this.refreshQueued;
   }
 
   private async doRefresh(): Promise<void> {
-    const discovered: UpstreamTools[] = [];
-    for (const link of this.links.values()) {
-      try {
-        await link.connect();
-        discovered.push({
-          upstreamId: link.spec.id,
-          namespace: link.spec.namespace,
-          tools: await link.listTools(),
+    // In parallel, each under its own budget: one slow upstream no longer
+    // serializes (and stalls) discovery of all the others.
+    const links = [...this.links.values()];
+    const results = await Promise.all(
+      links.map(async (link): Promise<UpstreamTools | null> => {
+        let timer: NodeJS.Timeout | undefined;
+        const timeout = new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`timed out after ${DISCOVERY_TIMEOUT_MS / 1000}s`)),
+            DISCOVERY_TIMEOUT_MS
+          );
+          timer.unref?.();
         });
-        this.discoveryErrors.delete(link.spec.id);
-      } catch (err) {
-        this.discoveryErrors.set(link.spec.id, `tool discovery failed: ${String(err)}`);
-        console.error(
-          `[upstream:${link.spec.id}] unavailable: ${String(err)} — its tools are omitted until it recovers`
-        );
-      }
-    }
+        try {
+          const tools = await Promise.race([
+            (async () => {
+              await link.connect();
+              return link.listTools();
+            })(),
+            timeout,
+          ]);
+          this.discoveryErrors.delete(link.spec.id);
+          return { upstreamId: link.spec.id, namespace: link.spec.namespace, tools };
+        } catch (err) {
+          this.discoveryErrors.set(link.spec.id, `tool discovery failed: ${String(err)}`);
+          console.error(
+            `[upstream:${link.spec.id}] unavailable: ${String(err)} — its tools are omitted until it recovers`
+          );
+          return null;
+        } finally {
+          clearTimeout(timer);
+        }
+      })
+    );
+    // An upstream removed or replaced while we were waiting must not have its
+    // old tools written back into the catalog.
+    const discovered = results.filter(
+      (r, i): r is UpstreamTools => r !== null && this.links.get(r.upstreamId) === links[i]
+    );
 
     const { entries, collisions } = buildCatalog(discovered);
     for (const collision of collisions) console.error(`[gateway] tool collision: ${collision}`);

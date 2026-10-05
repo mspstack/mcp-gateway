@@ -114,6 +114,38 @@ interface SessionRecord {
    * replay" — worth logging, since it is otherwise unobservable.
    */
   streamOpen: boolean;
+  /** Last request on this session (ms epoch) — drives the idle sweep and the per-principal cap. */
+  lastSeen: number;
+  /** Who opened it (clientInfo, User-Agent, OAuth client) — for logs and the admin sessions list. */
+  client: string;
+}
+
+/**
+ * A one-line description of the client opening a session, from the initialize
+ * request's clientInfo, the User-Agent and — for gateway-issued tokens — the
+ * OAuth client the token was minted for. Diagnostic only: none of it is
+ * trusted for anything, which is why the token is merely decoded here (the
+ * auth resolver already verified it).
+ */
+function describeClient(req: Request): string {
+  const params = (req.body as { params?: { clientInfo?: { name?: unknown; version?: unknown } } } | undefined)?.params;
+  const info = params?.clientInfo;
+  const parts: string[] = [];
+  if (info && typeof info.name === "string") {
+    parts.push(typeof info.version === "string" ? `${info.name}/${info.version}` : info.name);
+  }
+  const ua = headerValue(req, "user-agent");
+  if (ua) parts.push(`ua="${ua.slice(0, 120)}"`);
+  const token = bearerToken(req.headers.authorization);
+  if (token) {
+    try {
+      const clientId = decodeJwt(token).client_id;
+      if (typeof clientId === "string") parts.push(`oauth-client=${clientId}`);
+    } catch {
+      // not a JWT (static token) — nothing to add
+    }
+  }
+  return parts.length > 0 ? parts.join(" ") : "unknown client";
 }
 
 function rpcError(res: Response, status: number, code: number, message: string): void {
@@ -396,23 +428,39 @@ export function createApp(deps: AppDeps): express.Express {
       .sort()
       .join("\n");
 
-  /** Re-check every live session's visible tools; notify only those that changed. */
+  /**
+   * Re-check every live session's visible tools; notify only those that changed.
+   *
+   * The fingerprint is computed once per distinct principal, not once per
+   * session: it costs several SQLite reads per catalog tool, the whole loop is
+   * synchronous, and one user's client can hold thousands of sessions. Per
+   * session, a single toggle on a large catalog blocked the event loop for
+   * minutes (2026-10-05: ~3,000 sessions × ~100 ms — /health timed out).
+   */
   const broadcastVisibility = (): void => {
+    const fingerprints = new Map<string, string>();
+    const buffered = new Map<string, number>();
     for (const [id, session] of sessions) {
-      const fingerprint = visibleFingerprint(session.principal);
+      const key = principalKey(session.principal);
+      let fingerprint = fingerprints.get(key);
+      if (fingerprint === undefined) {
+        fingerprint = visibleFingerprint(session.principal);
+        fingerprints.set(key, fingerprint);
+      }
       if (fingerprint === session.visibleFingerprint) continue;
       session.visibleFingerprint = fingerprint;
       if (!session.streamOpen) {
         // Not an error: the event store keeps it for a resuming client. Logged
         // because "the client never saw it" looks identical to a policy bug
-        // from the outside.
-        console.error(
-          `[http] session ${id} (${session.principal.label}) has no open stream — list_changed buffered for replay`
-        );
+        // from the outside — one line per principal, not per session.
+        buffered.set(session.principal.label, (buffered.get(session.principal.label) ?? 0) + 1);
       }
       session.server.sendToolListChanged().catch((err) => {
         console.error(`[http] list_changed notify failed for session ${id}: ${String(err)}`);
       });
+    }
+    for (const [label, count] of buffered) {
+      console.error(`[http] ${count} session(s) of ${label} have no open stream — list_changed buffered for replay`);
     }
   };
   manager.onCatalogChanged = broadcastVisibility;
@@ -424,15 +472,50 @@ export function createApp(deps: AppDeps): express.Express {
    * Deliberately manual: an in-flight tools/call on a dropped session fails, so
    * this can't be a side effect of every pref change.
    */
+  /** Drop one session from the table and close its transport (already-gone is fine). */
+  const evictSession = (id: string, session: SessionRecord, reason: string): void => {
+    sessions.delete(id);
+    console.error(`[http] session ${id} (${session.principal.label}) closed: ${reason}`);
+    void session.transport.close().catch(() => {});
+  };
+
+  // Sessions are only removed when the client sends DELETE, and many never do
+  // (hosted connectors simply start a new one). Close the idle ones; the MCP
+  // spec has the client re-initialize when its session id answers 404.
+  const idleTimeoutMs = config.sessionIdleTimeoutMs ?? 30 * 60_000;
+  const maxPerPrincipal = config.maxSessionsPerPrincipal ?? 25;
+  const sweepIdleSessions = (now = Date.now()): number => {
+    if (idleTimeoutMs <= 0) return 0;
+    let closed = 0;
+    for (const [id, session] of [...sessions]) {
+      // A held notification stream is a live client, however quiet.
+      if (session.streamOpen || now - session.lastSeen < idleTimeoutMs) continue;
+      evictSession(id, session, `idle for ${Math.round((now - session.lastSeen) / 60_000)} min`);
+      closed += 1;
+    }
+    return closed;
+  };
+  if (idleTimeoutMs > 0) {
+    setInterval(() => sweepIdleSessions(), Math.min(60_000, idleTimeoutMs)).unref();
+  }
+  /** Make room for one more session of `principal` by closing its least recently used ones. */
+  const enforcePrincipalCap = (principal: Principal): void => {
+    if (maxPerPrincipal <= 0) return;
+    const key = principalKey(principal);
+    const own = [...sessions].filter(([, s]) => principalKey(s.principal) === key);
+    if (own.length < maxPerPrincipal) return;
+    own.sort(([, a], [, b]) => a.lastSeen - b.lastSeen);
+    for (const [id, session] of own.slice(0, own.length - maxPerPrincipal + 1)) {
+      evictSession(id, session, `over the ${maxPerPrincipal}-session cap for this principal (least recently used)`);
+    }
+  };
+
   const reloadSessions = (match: (session: SessionRecord, sessionId: string) => boolean): number => {
     let closed = 0;
     for (const [id, session] of [...sessions]) {
       if (!match(session, id)) continue;
-      sessions.delete(id);
       closed += 1;
-      console.error(`[http] session ${id} (${session.principal.label}) closed on request — client must re-initialize`);
-      // Errors here mean the transport is already gone, which is the goal.
-      void session.transport.close().catch(() => {});
+      evictSession(id, session, "closed on request — client must re-initialize");
     }
     return closed;
   };
@@ -444,6 +527,8 @@ export function createApp(deps: AppDeps): express.Express {
       label: session.principal.label,
       role: session.principal.roleName,
       streamOpen: session.streamOpen,
+      client: session.client,
+      lastSeen: new Date(session.lastSeen).toISOString(),
       toolCount: session.visibleFingerprint === "" ? 0 : session.visibleFingerprint.split("\n").length,
     }));
 
@@ -511,6 +596,7 @@ export function createApp(deps: AppDeps): express.Express {
         if (principalKey(session.principal) !== principalKey(auth.principal)) {
           return rpcError(res, 403, -32003, "Forbidden: credentials do not match this session");
         }
+        session.lastSeen = Date.now();
         attachCallContext(req);
         await session.transport.handleRequest(req, res, req.body);
         return;
@@ -560,6 +646,7 @@ export function createApp(deps: AppDeps): express.Express {
         `${config.publicUrl.replace(/\/+$/, "")}/me`,
         principalEmail
       );
+      const client = describeClient(req);
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         // Per-session replay window: a list_changed emitted while the client's
@@ -567,15 +654,18 @@ export function createApp(deps: AppDeps): express.Express {
         // the client resumes with Last-Event-ID.
         eventStore: new ReplayEventStore(),
         onsessioninitialized: (newSessionId) => {
+          enforcePrincipalCap(auth.principal);
           sessions.set(newSessionId, {
             transport,
             server,
             principal: auth.principal,
             visibleFingerprint: visibleFingerprint(auth.principal),
             streamOpen: false,
+            lastSeen: Date.now(),
+            client,
           });
           console.error(
-            `[http] session ${newSessionId} created for ${auth.principal.label} (${auth.principal.roleName})`
+            `[http] session ${newSessionId} created for ${auth.principal.label} (${auth.principal.roleName}) — ${client} from ${requestIp(req) ?? "unknown"}`
           );
         },
       });
@@ -605,12 +695,14 @@ export function createApp(deps: AppDeps): express.Express {
       if (principalKey(session.principal) !== principalKey(auth.principal)) {
         return rpcError(res, 403, -32003, "Forbidden: credentials do not match this session");
       }
+      session.lastSeen = Date.now();
       // A GET is the client opening its notification stream; track it so
       // broadcastVisibility can say whether a notification went out live.
       if (req.method === "GET") {
         session.streamOpen = true;
         res.on("close", () => {
           session.streamOpen = false;
+          session.lastSeen = Date.now(); // idle clock starts when the stream drops
         });
       }
       await session.transport.handleRequest(req, res);
@@ -866,7 +958,7 @@ export function createApp(deps: AppDeps): express.Express {
 
         /** Common success shape for both grants: fresh access + rotated refresh. */
         const issueTokens = async (principal: { iss: string; sub: string }, refreshToken: string) => {
-          const accessToken = await mintAccessToken(principal, config.publicUrl, jwtSecret);
+          const accessToken = await mintAccessToken(principal, config.publicUrl, jwtSecret, tokenClientId);
           console.error(
             `[oauth] access token issued to client ${tokenClientId} via ${grantType} (sha256 ${sha256(accessToken).slice(0, 12)}…)`
           );

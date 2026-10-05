@@ -625,6 +625,65 @@ describe("session reload", () => {
   });
 });
 
+/**
+ * 2026-10-05: one user's connector had ~3,000 sessions it never DELETEd, and
+ * every admin toggle walked them all synchronously — the gateway stopped
+ * answering for minutes. Sessions are now capped per principal and labelled
+ * with the client that opened them.
+ */
+describe("session hygiene", () => {
+  it("caps live sessions per principal, closing the least recently used, and names the client", async () => {
+    const capRepo = new Repo(openDatabase(":memory:"));
+    const capManager = new UpstreamManager([upstreamSpec], () => fakeLink);
+    await capManager.start();
+    const capServer = createApp({
+      config: { ...config, maxSessionsPerPrincipal: 2 },
+      repo: capRepo,
+      manager: capManager,
+      policy: new PolicyService(capRepo),
+      secretStore: null,
+      oidcVerifier: null,
+      adminUiDir: null,
+    }).listen(0);
+    const capBase = `http://localhost:${(capServer.address() as AddressInfo).port}`;
+    const post = async (body: unknown, sid?: string) =>
+      fetch(`${capBase}/mcp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          Authorization: "Bearer tok-viewer",
+          ...(sid ? { "mcp-session-id": sid } : {}),
+        },
+        body: JSON.stringify(body),
+      });
+    try {
+      const open = async () => {
+        const response = await post(initBody);
+        await response.text();
+        return response.headers.get("mcp-session-id")!;
+      };
+      const oldest = await open();
+      const recent = await open();
+      // touch `recent` so `oldest` is the least recently used
+      await (await post({ jsonrpc: "2.0", method: "notifications/initialized" }, recent)).text();
+      const newest = await open();
+
+      expect((await post({ jsonrpc: "2.0", id: 9, method: "tools/list" }, oldest)).status).toBe(404);
+      expect((await post({ jsonrpc: "2.0", id: 9, method: "tools/list" }, recent)).status).toBe(200);
+      expect((await post({ jsonrpc: "2.0", id: 9, method: "tools/list" }, newest)).status).toBe(200);
+
+      const listed = (await (
+        await fetch(`${capBase}/api/sessions`, { headers: { Authorization: "Bearer tok-admin" } })
+      ).json()) as Array<{ sessionId: string; client: string }>;
+      expect(listed.map((s) => s.sessionId).sort()).toEqual([newest, recent].sort());
+      expect(listed[0]!.client).toMatch(/^t\/0 /); // clientInfo from the initialize request
+    } finally {
+      capServer.close();
+    }
+  });
+});
+
 describe("forgetting a user", () => {
   it("removes the row and everything keyed to that identity, and 404s twice", async () => {
     const user = repo.upsertUserOnLogin({ iss: "https://idp", sub: "gone", email: "gone@test" });

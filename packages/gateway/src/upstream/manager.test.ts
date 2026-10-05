@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { UpstreamSpec } from "../config.js";
-import { UpstreamManager, type UpstreamLink } from "./manager.js";
+import { DISCOVERY_TIMEOUT_MS, UpstreamManager, type UpstreamLink } from "./manager.js";
 
 const spec = (id: string, namespace: string, enabled = true): UpstreamSpec => ({
   id,
@@ -172,5 +172,47 @@ describe("UpstreamManager", () => {
     await manager.refreshCatalog(); // joins/awaits the refresh
     expect(changed).toHaveBeenCalledTimes(2);
     expect(exposedNames(manager)).toEqual(["demo_echo", "demo_reverse"]);
+  });
+
+  /**
+   * 2026-10-05: every admin toggle awaits a refresh, and discovery walked the
+   * upstreams one by one with no deadline — one hung upstream held the UI.
+   */
+  it("gives up on a hung upstream after the discovery budget and still serves the rest", async () => {
+    vi.useFakeTimers();
+    try {
+      const hung = new FakeLink(spec("hung", "hung"), [tool("x")]);
+      hung.connect = () => new Promise<void>(() => {}); // never settles
+      const good = new FakeLink(spec("everything", "demo"), [tool("echo")]);
+      const { manager } = setup([hung, good]);
+
+      const started = manager.start();
+      await vi.advanceTimersByTimeAsync(DISCOVERY_TIMEOUT_MS);
+      await started;
+
+      expect(exposedNames(manager)).toEqual(["demo_echo"]);
+      expect(manager.summaries().find((s) => s.id === "hung")!.lastError).toMatch(/timed out/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not hand back a pass that started before an upstream was removed", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const slow = new FakeLink(spec("slow", "slow"), [tool("a")]);
+    const cipp = new FakeLink(spec("cipp", "cipp"), [tool("b")]);
+    const { manager } = setup([slow, cipp]);
+    await manager.start();
+    expect(exposedNames(manager)).toEqual(["cipp_b", "slow_a"]);
+
+    // A refresh is in flight (slow upstream) when the admin disables cipp.
+    slow.connect = () => gate;
+    const inFlight = manager.refreshCatalog();
+    const removal = manager.removeUpstream("cipp");
+    release();
+    await Promise.all([inFlight, removal]);
+
+    expect(exposedNames(manager)).toEqual(["slow_a"]);
   });
 });
