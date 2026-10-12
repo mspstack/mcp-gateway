@@ -481,6 +481,7 @@ export class Repo {
     this.db.exec("BEGIN");
     try {
       const prefs = this.db.prepare("DELETE FROM user_prefs WHERE principal = ?").run(principal).changes;
+      this.db.prepare("DELETE FROM tool_usage_daily WHERE principal = ?").run(principal);
       const credentials = this.db
         .prepare("DELETE FROM user_credentials WHERE principal = ?")
         .run(principal).changes;
@@ -1136,6 +1137,103 @@ export class Repo {
       .run(principal, upstreamId, field);
     return result.changes > 0;
   }
+
+  // ── usage statistics ──
+
+  /** Day of the last retention prune, so it runs at most once per UTC day. */
+  private usagePrunedDay = "";
+
+  /**
+   * Count one tools/call into today's aggregate row. Names and outcomes only —
+   * never arguments or results. Rows older than USAGE_RETENTION_DAYS are
+   * pruned opportunistically on the first call of each day.
+   */
+  recordToolUsage(event: ToolUsageEvent, now = new Date()): void {
+    const day = now.toISOString().slice(0, 10);
+    this.db
+      .prepare(
+        `INSERT INTO tool_usage_daily
+           (day, principal, label, upstream_id, tool_name, calls, errors, denied, total_ms, last_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (day, principal, upstream_id, tool_name) DO UPDATE SET
+           label = excluded.label,
+           calls = calls + excluded.calls,
+           errors = errors + excluded.errors,
+           denied = denied + excluded.denied,
+           total_ms = total_ms + excluded.total_ms,
+           last_at = excluded.last_at`
+      )
+      .run(
+        day,
+        event.principal,
+        event.label,
+        event.upstreamId,
+        event.toolName,
+        event.outcome === "denied" ? 0 : 1,
+        event.outcome === "error" ? 1 : 0,
+        event.outcome === "denied" ? 1 : 0,
+        Math.max(0, Math.round(event.durationMs ?? 0)),
+        now.toISOString()
+      );
+    if (this.usagePrunedDay !== day) {
+      this.usagePrunedDay = day;
+      const cutoff = new Date(now.getTime() - USAGE_RETENTION_DAYS * 86_400_000).toISOString().slice(0, 10);
+      this.db.prepare("DELETE FROM tool_usage_daily WHERE day < ?").run(cutoff);
+    }
+  }
+
+  /** Aggregate rows from `sinceDay` (inclusive, YYYY-MM-DD) on. */
+  toolUsageSince(sinceDay: string): ToolUsageRow[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT day, principal, label, upstream_id, tool_name, calls, errors, denied, total_ms, last_at
+             FROM tool_usage_daily WHERE day >= ? ORDER BY day`
+        )
+        .all(sinceDay) as Array<Record<string, unknown>>
+    ).map((row) => ({
+      day: row.day as string,
+      principal: row.principal as string,
+      label: row.label as string,
+      upstreamId: row.upstream_id as string,
+      toolName: row.tool_name as string,
+      calls: Number(row.calls),
+      errors: Number(row.errors),
+      denied: Number(row.denied),
+      totalMs: Number(row.total_ms),
+      lastAt: row.last_at as string,
+    }));
+  }
+}
+
+/** How long daily usage aggregates are kept. */
+export const USAGE_RETENTION_DAYS = 180;
+
+export interface ToolUsageEvent {
+  /** prefsIdentity of the caller — stable across role changes. */
+  principal: string;
+  /** Display label (email / token label) at the time of the call. */
+  label: string;
+  /** Owning upstream; "gw" for the self-management tools, "" for unknown names. */
+  upstreamId: string;
+  /** Upstream tool name (un-namespaced), or the requested name when unknown. */
+  toolName: string;
+  /** "ok" and "error" are executed calls; "denied" never reached the upstream. */
+  outcome: "ok" | "error" | "denied";
+  durationMs?: number;
+}
+
+export interface ToolUsageRow {
+  day: string;
+  principal: string;
+  label: string;
+  upstreamId: string;
+  toolName: string;
+  calls: number;
+  errors: number;
+  denied: number;
+  totalMs: number;
+  lastAt: string;
 }
 
 const mapRole = (row: Record<string, unknown>): RoleRow => ({

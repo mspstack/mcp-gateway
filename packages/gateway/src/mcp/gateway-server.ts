@@ -11,9 +11,11 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import { prefsIdentity, type Principal } from "../auth/principal.js";
 import type { UpstreamSpec } from "../config.js";
+import type { ToolUsageEvent } from "../db/repo.js";
 import type { PolicyService } from "../domain/policy.js";
 import type { UpstreamManager } from "../upstream/manager.js";
 import { callSelfTool, SELF_TOOLS, type SelfToolDeps } from "./self-tools.js";
@@ -61,7 +63,9 @@ export function createGatewayServer(
   /** Public /me URL, so a self-inflicted denial can point at the switch. */
   meUrl?: string,
   /** The principal's email on file (users table), for identityHeaders. */
-  principalEmail: string | null = null
+  principalEmail: string | null = null,
+  /** Usage statistics sink — one event per tools/call; failures are swallowed. */
+  recordUsage?: (event: ToolUsageEvent) => void
 ): Server {
   const server = new Server(
     { name: SERVER_NAME, version: SERVER_VERSION },
@@ -86,6 +90,41 @@ export function createGatewayServer(
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    // What the call resolved to, filled in by handleCall as it decides; read
+    // once the outcome is known. Starts as "denied, unknown tool".
+    const track = { upstreamId: "", toolName: request.params.name, executed: false };
+    const started = Date.now();
+    const record = (outcome: ToolUsageEvent["outcome"]): void => {
+      if (!recordUsage) return;
+      try {
+        recordUsage({
+          principal: prefsIdentity(principal),
+          label: principal.label,
+          upstreamId: track.upstreamId,
+          toolName: track.toolName,
+          outcome,
+          durationMs: Date.now() - started,
+        });
+      } catch (err) {
+        // Statistics must never fail a call.
+        console.error(`[usage] could not record ${request.params.name}: ${String(err)}`);
+      }
+    };
+    try {
+      const result = await handleCall(request, extra, track);
+      record(!track.executed ? "denied" : result.isError ? "error" : "ok");
+      return result;
+    } catch (err) {
+      record(track.executed ? "error" : "denied");
+      throw err;
+    }
+  });
+
+  const handleCall = async (
+    request: { params: { name: string; arguments?: Record<string, unknown> | undefined } },
+    extra: { authInfo?: { extra?: Record<string, unknown> } } | undefined,
+    track: { upstreamId: string; toolName: string; executed: boolean }
+  ): Promise<CallToolResult> => {
     // The `gw` namespace is reserved (config.ts refuses it for upstreams), so
     // this can never shadow a federated tool or be shadowed by one.
     if (selfTools) {
@@ -95,9 +134,17 @@ export function createGatewayServer(
         request.params.name,
         request.params.arguments ?? {}
       );
-      if (handled) return handled;
+      if (handled) {
+        track.upstreamId = "gw";
+        track.executed = true;
+        return handled as CallToolResult;
+      }
     }
     const entry = manager.entryFor(request.params.name);
+    if (entry) {
+      track.upstreamId = entry.upstreamId;
+      track.toolName = entry.upstreamToolName;
+    }
     if (!entry || !policy.allowsFor(principal, entry)) {
       // A tool the caller closed themselves is already listed on their own /me
       // page, so saying so leaks nothing — and saves them asking an admin about
@@ -140,6 +187,7 @@ export function createGatewayServer(
     }
     const args = request.params.arguments ?? {};
     console.error(`[mcp] ${principal.label} tools/call ${request.params.name} -> allowed`);
+    track.executed = true;
 
     // sessionMode:"per-user" — route the call over the caller's own
     // connection, with their registered credential refs layered onto the
@@ -177,7 +225,7 @@ export function createGatewayServer(
     }
 
     return manager.callTool(entry, args);
-  });
+  };
 
   return server;
 }

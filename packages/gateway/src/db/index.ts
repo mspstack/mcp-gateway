@@ -410,4 +410,30 @@ export function migrate(db: DatabaseSync): void {
 
     db.exec("PRAGMA user_version = 8");
   }
+
+  if (version < 9) {
+    // Usage statistics: one row per (UTC day, principal, upstream, tool),
+    // incremented on every tools/call. Daily aggregates rather than a call log:
+    // bounded size, and no arguments or results are ever stored — those carry
+    // customer data. `principal` is the prefsIdentity key; `label` is the
+    // display name at the time of the last call.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS tool_usage_daily (
+        day TEXT NOT NULL,
+        principal TEXT NOT NULL,
+        label TEXT NOT NULL,
+        upstream_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        calls INTEGER NOT NULL DEFAULT 0,
+        errors INTEGER NOT NULL DEFAULT 0,
+        denied INTEGER NOT NULL DEFAULT 0,
+        total_ms INTEGER NOT NULL DEFAULT 0,
+        last_at TEXT NOT NULL,
+        PRIMARY KEY (day, principal, upstream_id, tool_name)
+      );
+      CREATE INDEX IF NOT EXISTS tool_usage_daily_principal ON tool_usage_daily (principal);
+    `);
+
+    db.exec("PRAGMA user_version = 9");
+  }
 }

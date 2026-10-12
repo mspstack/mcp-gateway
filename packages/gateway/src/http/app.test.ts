@@ -684,6 +684,31 @@ describe("session hygiene", () => {
   });
 });
 
+describe("usage statistics", () => {
+  it("counts executed and denied tool calls and serves them on /api/usage (admin only)", async () => {
+    const sid = await initSession("tok-viewer");
+    const call = (name: string) =>
+      rpc({ jsonrpc: "2.0", id: 60, method: "tools/call", params: { name, arguments: {} } }, "tok-viewer", sid);
+    await call("fake_read_thing");
+    await call("fake_write_thing"); // above viewer's tier → denied
+
+    expect((await fetch(`${base}/api/usage`, { headers: { Authorization: "Bearer tok-viewer" } })).status).toBe(403);
+    const usage = (await (
+      await fetch(`${base}/api/usage?days=1`, { headers: { Authorization: "Bearer tok-admin" } })
+    ).json()) as {
+      users: Array<{ label: string; calls: number; denied: number }>;
+      tools: Array<{ toolName: string; calls: number; denied: number }>;
+      sessions: { byPrincipal: Array<{ label: string; count: number }> };
+    };
+    const alice = usage.users.find((u) => u.label === "alice")!;
+    expect(alice.calls).toBeGreaterThanOrEqual(1);
+    expect(alice.denied).toBeGreaterThanOrEqual(1);
+    expect(usage.tools.find((t) => t.toolName === "read_thing")!.calls).toBeGreaterThanOrEqual(1);
+    expect(usage.tools.find((t) => t.toolName === "write_thing")!.denied).toBeGreaterThanOrEqual(1);
+    expect(usage.sessions.byPrincipal.find((g) => g.label === "alice")!.count).toBeGreaterThanOrEqual(1);
+  });
+});
+
 describe("forgetting a user", () => {
   it("removes the row and everything keyed to that identity, and 404s twice", async () => {
     const user = repo.upsertUserOnLogin({ iss: "https://idp", sub: "gone", email: "gone@test" });

@@ -12,7 +12,8 @@ import { z } from "zod";
 import { ConfigError, parseUpstreamSpec } from "../config.js";
 import { isMaxTier } from "../domain/policy.js";
 import { isValidCidr } from "../domain/net-acl.js";
-import { ACL_SCOPES, isAclScope } from "../db/repo.js";
+import { ACL_SCOPES, isAclScope, USAGE_RETENTION_DAYS } from "../db/repo.js";
+import { summarizeUsage, usageSinceDay, type LiveSessionInfo } from "../domain/usage.js";
 import { derivedGroupOf } from "../domain/catalog.js";
 import { resolveToolTargets } from "../domain/tool-targets.js";
 import { listSnapshots, runBackup } from "../db/backup.js";
@@ -95,6 +96,16 @@ export function createAdminRouter(deps: AppDeps, admin: AdminDeps): Router {
     "/sessions",
     h((_req, res) => {
       res.json(admin.sessionSummaries());
+    })
+  );
+
+  /** Usage statistics (Usage tab): calls per user / server / tool over `days`, plus live sessions. */
+  router.get(
+    "/usage",
+    h((req, res) => {
+      const days = z.coerce.number().int().min(1).max(USAGE_RETENTION_DAYS).default(7).parse(req.query.days ?? undefined);
+      const rows = repo.toolUsageSince(usageSinceDay(days));
+      res.json(summarizeUsage(rows, admin.sessionSummaries() as unknown as LiveSessionInfo[], days));
     })
   );
 

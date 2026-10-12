@@ -644,7 +644,8 @@ export function createApp(deps: AppDeps): express.Express {
             }
           : undefined,
         `${config.publicUrl.replace(/\/+$/, "")}/me`,
-        principalEmail
+        principalEmail,
+        (event) => deps.repo.recordToolUsage(event)
       );
       const client = describeClient(req);
       const transport = new StreamableHTTPServerTransport({

@@ -58,6 +58,13 @@
   #login { max-width: 420px; margin: 80px auto; }
   .hidden { display: none !important; }
   code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; }
+  /* Wide grids (one column per upstream) scroll inside their panel instead of
+     spilling past it; the first column stays pinned so the row stays readable. */
+  .scroll-x { overflow-x: auto; }
+  .sticky-first th:first-child, .sticky-first td:first-child { position: sticky; left: 0; z-index: 1;
+    background: var(--panel); white-space: nowrap; }
+  .bar { display: inline-block; height: 8px; background: var(--accent); border-radius: 4px;
+    vertical-align: middle; min-width: 2px; }
 </style>
 </head>
 <body>
@@ -86,6 +93,7 @@
 <div id="app" class="hidden">
   <nav>
     <button data-tab="status" class="active">Status</button>
+    <button data-tab="usage">Usage</button>
     <button data-tab="upstreams">MCP servers</button>
     <button data-tab="tools">Tools</button>
     <button data-tab="roles">Roles</button>
@@ -95,6 +103,7 @@
   </nav>
   <main>
     <div id="tab-status"></div>
+    <div id="tab-usage" class="hidden"></div>
     <div id="tab-upstreams" class="hidden"></div>
     <div id="tab-tools" class="hidden"></div>
     <div id="tab-roles" class="hidden"></div>
@@ -195,6 +204,85 @@ async function renderStatus() {
           <td class="muted">${esc(u.lastError || "")}</td></tr>`).join("")}
       </table>
     </section>`;
+}
+
+// ── Usage ──
+let USAGE_DAYS = 7;
+async function renderUsage() {
+  const el = $("#tab-usage");
+  el.innerHTML = `<section class="panel"><h2>Loading…</h2></section>`;
+  const u = await api(`/usage?days=${USAGE_DAYS}`);
+  const num = n => Number(n || 0).toLocaleString();
+  const ms = n => n === null || n === undefined ? "—" : n >= 1000 ? (n / 1000).toFixed(1) + " s" : n + " ms";
+  const when = iso => iso ? new Date(iso).toLocaleString() : "—";
+  // Errors/denials only when there are any — a column of zeros is noise.
+  const flags = r => [r.errors ? `<span style="color:var(--err)">${num(r.errors)} err</span>` : "",
+    r.denied ? `<span style="color:var(--warn)">${num(r.denied)} denied</span>` : ""].filter(Boolean).join(" · ");
+  const maxDay = Math.max(1, ...u.daily.map(d => d.calls + d.denied));
+  const maxUser = Math.max(1, ...u.users.map(r => r.calls + r.denied));
+  const maxUp = Math.max(1, ...u.upstreams.map(r => r.calls + r.denied));
+  const bar = (v, max) => v > 0 ? `<span class="bar" style="width:${Math.round(120 * v / max)}px"></span>` : "";
+  el.innerHTML = `
+    <section class="panel"><h2>Usage</h2>
+      <div class="row">
+        <label>Period <select id="usage-days">
+          ${[1, 7, 30, 90].map(d => `<option value="${d}" ${d === USAGE_DAYS ? "selected" : ""}>${d === 1 ? "today" : "last " + d + " days"}</option>`).join("")}
+        </select></label>
+        <button class="btn secondary" id="usage-refresh">Refresh</button>
+      </div>
+      <table>
+        <tr><td>Tool calls</td><td><b>${num(u.totals.calls)}</b> ${flags(u.totals)}</td></tr>
+        <tr><td>Active users</td><td>${num(u.totals.users)}</td></tr>
+        <tr><td>Live MCP sessions</td><td>${num(u.sessions.total)} <span class="muted">(${num(u.sessions.streamsOpen)} with an open notification stream)</span></td></tr>
+      </table>
+      <p class="muted">Counted per UTC day; tool names and outcomes only — arguments and results are never stored. Kept 180 days.</p>
+    </section>
+    <section class="panel"><h2>Calls per day</h2>
+      <table>${u.daily.map(d => `<tr><td class="mono" style="width:110px">${esc(d.day)}</td>
+        <td>${bar(d.calls + d.denied, maxDay)} ${num(d.calls)} ${flags(d)}</td></tr>`).join("")}</table>
+    </section>
+    <section class="panel"><h2>By user</h2>
+      ${u.users.length ? `<div class="scroll-x"><table>
+        <tr><th>User</th><th>Calls</th><th>MCP servers</th><th>Avg</th><th>Live sessions</th><th>Last call</th></tr>
+        ${u.users.map(r => `<tr>
+          <td>${esc(r.label)}</td>
+          <td style="white-space:nowrap">${bar(r.calls + r.denied, maxUser)} ${num(r.calls)} ${flags(r)}</td>
+          <td>${r.upstreams.map(x => `<span class="pill">${esc(x.upstreamId || "unknown")} ${num(x.calls)}</span>`).join(" ")}</td>
+          <td>${ms(r.avgMs)}</td><td>${num(r.liveSessions)}</td><td class="muted">${when(r.lastAt)}</td>
+        </tr>`).join("")}
+      </table></div>` : '<p class="muted">No tool calls in this period.</p>'}
+    </section>
+    <section class="panel"><h2>By MCP server</h2>
+      ${u.upstreams.length ? `<table>
+        <tr><th>Server</th><th>Calls</th><th>Users</th><th>Avg</th><th>Last call</th></tr>
+        ${u.upstreams.map(r => `<tr>
+          <td class="mono">${esc(r.upstreamId || "(unknown tool)")}</td>
+          <td style="white-space:nowrap">${bar(r.calls + r.denied, maxUp)} ${num(r.calls)} ${flags(r)}</td>
+          <td>${num(r.users)}</td><td>${ms(r.avgMs)}</td><td class="muted">${when(r.lastAt)}</td>
+        </tr>`).join("")}
+      </table>` : '<p class="muted">No tool calls in this period.</p>'}
+    </section>
+    <section class="panel"><h2>Top tools</h2>
+      ${u.tools.length ? `<div class="scroll-x"><table>
+        <tr><th>Server</th><th>Tool</th><th>Calls</th><th>Users</th><th>Avg</th></tr>
+        ${u.tools.map(r => `<tr>
+          <td class="mono">${esc(r.upstreamId || "—")}</td><td class="mono">${esc(r.toolName)}</td>
+          <td style="white-space:nowrap">${num(r.calls)} ${flags(r)}</td><td>${num(r.users)}</td><td>${ms(r.avgMs)}</td>
+        </tr>`).join("")}
+      </table></div>` : '<p class="muted">No tool calls in this period.</p>'}
+    </section>
+    <section class="panel"><h2>Live sessions by user</h2>
+      ${u.sessions.byPrincipal.length ? `<div class="scroll-x"><table>
+        <tr><th>User</th><th>Sessions</th><th>Streams open</th><th>Clients</th><th>Last request</th></tr>
+        ${u.sessions.byPrincipal.map(g => `<tr>
+          <td>${esc(g.label)}</td><td>${num(g.count)}</td><td>${num(g.streamsOpen)}</td>
+          <td class="mono" style="font-size:11px">${g.clients.map(c => `${num(c.count)} × ${esc(c.client)}`).join("<br>")}</td>
+          <td class="muted">${when(g.lastSeen)}</td>
+        </tr>`).join("")}
+      </table></div>` : '<p class="muted">No live sessions.</p>'}
+    </section>`;
+  $("#usage-days").onchange = e => { USAGE_DAYS = Number(e.target.value); renderUsage(); };
+  $("#usage-refresh").onclick = () => renderUsage();
 }
 
 // ── Upstreams ──
@@ -631,7 +719,7 @@ async function renderRoles() {
     aclData.acls.map(a => `<option value="${a.id}" ${sel===a.id?"selected":""}>${esc(a.name)}</option>`).join("");
   el.innerHTML = `
     <section class="panel"><h2>Roles × upstream access (max tier)</h2>
-      <table>
+      <div class="scroll-x"><table class="sticky-first">
         <tr><th>Role</th><th>Default</th>${upstreams.map(u => `<th class="mono">${esc(u.id)}</th>`).join("")}<th></th></tr>
         ${roles.map(r => `<tr>
           <td>${esc(r.name)} ${r.isAdmin ? '<span class="pill">admin</span>' : ""}</td>
@@ -642,7 +730,7 @@ async function renderRoles() {
           </select></td>`).join("")}
           <td>${r.protected ? "" : `<button class="btn danger" data-del-role="${r.id}">Delete</button>`}</td>
         </tr>`).join("")}
-      </table>
+      </table></div>
     </section>
     <section class="panel"><h2>New role</h2>
       <div class="row">
@@ -1229,7 +1317,7 @@ async function renderSecrets() {
   };
 }
 
-const RENDER = { status: renderStatus, upstreams: renderUpstreams, tools: renderTools,
+const RENDER = { status: renderStatus, usage: renderUsage, upstreams: renderUpstreams, tools: renderTools,
   roles: renderRoles, toolsets: renderToolSets, users: renderUsers, secrets: renderSecrets };
 
 async function boot() {
